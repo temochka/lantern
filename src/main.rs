@@ -2,7 +2,7 @@ use actix::{Actor, StreamHandler};
 use actix_web::{web, App, Error, HttpRequest, HttpResponse, HttpServer, Responder};
 use actix_web_actors::ws;
 use rusqlite::{params, Connection};
-use rusqlite::types::{FromSql, ValueRef, FromSqlError, FromSqlResult};
+use rusqlite::types::{FromSql, ValueRef, FromSqlResult};
 use serde::{Serialize, Deserialize};
 use serde_json;
 use futures::future::Future;
@@ -17,7 +17,6 @@ impl FromSql for JsonValue {
             ValueRef::Text(s) | ValueRef::Blob(s) => Ok(JsonValue(serde_json::Value::String(std::str::from_utf8(s).unwrap().to_string()))),
             ValueRef::Integer(n) => Ok(JsonValue(serde_json::Value::Number(serde_json::Number::from(n)))),
             ValueRef::Real(n) => Ok(JsonValue(serde_json::Value::Number(serde_json::Number::from_f64(n).unwrap()))),
-            _ => return Err(FromSqlError::InvalidType),
         }
     }
 }
@@ -81,7 +80,7 @@ impl LanternConnection {
 
                         match result {
                             Ok(result) => Response::Query { id: id, results: result },
-                            Err(error) => Response::Error { id: id, text: error }
+                            Err(error) => Response::Error { id: id, text: format!("{}", error) }
                         }
                     }
                 }
@@ -100,13 +99,13 @@ struct DbQuery {
 }
 
 impl actix::Message for DbQuery {
-    type Result = Result<serde_json::Value, String>;
+    type Result = Result<serde_json::Value, rusqlite::Error>;
 }
 
 impl Actor for LanternDb {
     type Context = actix::prelude::Context<Self>;
 
-    fn started(&mut self, ctx: &mut Self::Context) {
+    fn started(&mut self, _ctx: &mut Self::Context) {
         self.connection.execute(
             "CREATE TABLE lantern_migrations (
                 id              BIGINT PRIMARY KEY,
@@ -132,24 +131,15 @@ fn parse_row(row: & rusqlite::Row) -> rusqlite::Result<serde_json::Value> {
 }
 
 impl actix::Handler<DbQuery> for LanternDb {
-    type Result = Result<serde_json::Value, String>;
+    type Result = Result<serde_json::Value, rusqlite::Error>;
 
-    fn handle(&mut self, msg: DbQuery, ctx: &mut actix::prelude::Context<Self>) -> Self::Result {
+    fn handle(&mut self, msg: DbQuery, _ctx: &mut actix::prelude::Context<Self>) -> Self::Result {
         println!("Query received: {}", msg.query);
 
-        let mut stmt = self.connection.prepare(&msg.query).unwrap();
+        let mut stmt = self.connection.prepare(&msg.query)?;
+        let results = stmt.query_map(params![], |row| parse_row(row)).and_then(|r| r.collect())?;
 
-        let results: Result<Vec<_>, _> = stmt.query_map(params![], |row| {
-            parse_row(row)
-        })
-            .and_then(|r| r.collect());
-
-        match results {
-            Ok(results) => {
-                Ok(serde_json::Value::Array(results))
-            },
-            Err(err) => Err(format!("{}", err)),
-        }
+        Ok(serde_json::Value::Array(results))
     }
 }
 
