@@ -38,6 +38,7 @@ struct Migration {
 enum Request {
     Echo { id: String, text: String },
     Query { id: String, query: String },
+    Migration { id: String, ddl: String }
 }
 
 #[derive(Serialize)]
@@ -45,6 +46,7 @@ enum Request {
 enum Response {
     Echo { id: String, text: String },
     Query { id: String, results: serde_json::Value },
+    Migration { id: String },
     Error { id: String, text: String },
     ChannelError { message: String },
 }
@@ -75,6 +77,14 @@ impl LanternConnection {
             Ok(request) => {
                 match request {
                     Request::Echo { id, text } => Response::Echo { id: id, text: text },
+                    Request::Migration { id, ddl } => {
+                        let result = self.db_addr.send(DbQuery { query: ddl }).wait().unwrap();
+
+                        match result {
+                            Ok(_) => Response::Migration { id: id },
+                            Err(error) => Response::Error { id: id, text: format!("{}", error) }
+                        }
+                    },
                     Request::Query { id, query } => {
                         let result = self.db_addr.send(DbQuery { query }).wait().unwrap();
 
