@@ -5,6 +5,7 @@ use rusqlite::{params, Connection};
 use rusqlite::types::{FromSql, ValueRef, FromSqlResult};
 use serde::{Serialize, Deserialize};
 use serde_json;
+use std::collections::{HashMap};
 use futures::future::Future;
 
 #[derive(Serialize)]
@@ -33,11 +34,13 @@ struct Migration {
     statement: String,
 }
 
+type QueryArguments = HashMap<String, String>;
+
 #[derive(Deserialize)]
 #[serde(tag = "type")]
 enum Request {
     Echo { id: String, text: String },
-    Query { id: String, query: String },
+    Query { id: String, query: String, arguments: QueryArguments },
     Migration { id: String, ddl: String }
 }
 
@@ -85,7 +88,7 @@ impl LanternConnection {
                             Err(error) => Response::Error { id: id, text: format!("{}", error) }
                         }
                     },
-                    Request::Query { id, query } => {
+                    Request::Query { id, query, arguments: _ } => {
                         let result = self.db_addr.send(DbQuery { query }).wait().unwrap();
 
                         match result {
