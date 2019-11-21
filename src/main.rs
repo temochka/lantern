@@ -2,7 +2,7 @@ use actix::{Actor, StreamHandler};
 use actix_web::{web, App, Error, HttpRequest, HttpResponse, HttpServer, Responder};
 use actix_web_actors::ws;
 use rusqlite::{params, Connection};
-use rusqlite::types::{FromSql, ValueRef, FromSqlResult};
+use rusqlite::types::{FromSql, ValueRef, FromSqlResult, ToSql};
 use serde::{Serialize, Deserialize};
 use serde_json;
 use std::collections::{HashMap};
@@ -66,7 +66,6 @@ impl StreamHandler<ws::Message, ws::ProtocolError> for LanternConnection {
                 let res = self.handle_request(&text);
                 ctx.text(serde_json::to_string(&res).unwrap())
             },
-            ws::Message::Binary(bin) => ctx.binary(bin),
             _ => (),
         }
     }
@@ -81,15 +80,15 @@ impl LanternConnection {
                 match request {
                     Request::Echo { id, text } => Response::Echo { id: id, text: text },
                     Request::Migration { id, ddl } => {
-                        let result = self.db_addr.send(DbQuery { query: ddl }).wait().unwrap();
+                        let result = self.db_addr.send(DbMigration { query: ddl }).wait().unwrap();
 
                         match result {
                             Ok(_) => Response::Migration { id: id },
                             Err(error) => Response::Error { id: id, text: format!("{}", error) }
                         }
                     },
-                    Request::Query { id, query, arguments: _ } => {
-                        let result = self.db_addr.send(DbQuery { query }).wait().unwrap();
+                    Request::Query { id, query, arguments } => {
+                        let result = self.db_addr.send(DbQuery { query, arguments }).wait().unwrap();
 
                         match result {
                             Ok(result) => Response::Query { id: id, results: result },
@@ -108,6 +107,11 @@ struct LanternDb {
 }
 
 struct DbQuery {
+    query: String,
+    arguments: QueryArguments
+}
+
+struct DbMigration {
     query: String
 }
 
@@ -115,15 +119,20 @@ impl actix::Message for DbQuery {
     type Result = Result<serde_json::Value, rusqlite::Error>;
 }
 
+impl actix::Message for DbMigration {
+    type Result = Result<bool, rusqlite::Error>;
+}
+
+
 impl Actor for LanternDb {
     type Context = actix::prelude::Context<Self>;
 
     fn started(&mut self, _ctx: &mut Self::Context) {
         self.connection.execute(
             "CREATE TABLE lantern_migrations (
-                id              BIGINT PRIMARY KEY,
-                app_version     BIGINT NOT NULL DEFAULT 0,
-                batch_order     INT NOT NULL DEFAULT 0,
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                app_version     INTEGER NOT NULL DEFAULT 0,
+                batch_order     INTEGER NOT NULL DEFAULT 0,
                 statement       TEXT NOT NULL
             )",
             params![],
@@ -150,9 +159,25 @@ impl actix::Handler<DbQuery> for LanternDb {
         println!("Query received: {}", msg.query);
 
         let mut stmt = self.connection.prepare(&msg.query)?;
-        let results = stmt.query_map(params![], |row| parse_row(row)).and_then(|r| r.collect())?;
+        let arguments: Vec<_> = msg.arguments.iter().map(|(name, val)| (&name[..], val as &dyn ToSql)).collect();
+        let results = stmt.query_map_named(&arguments[..], |row| parse_row(row)).and_then(|r| r.collect())?;
 
         Ok(serde_json::Value::Array(results))
+    }
+}
+
+impl actix::Handler<DbMigration> for LanternDb {
+    type Result = Result<bool, rusqlite::Error>;
+
+    fn handle(&mut self, msg: DbMigration, _ctx: &mut actix::prelude::Context<Self>) -> Self::Result {
+        println!("Migration received: {}", msg.query);
+
+        let tx = self.connection.transaction()?;
+        tx.execute("INSERT INTO lantern_migrations (statement) VALUES (?)", params![msg.query])?;
+        tx.execute(&msg.query[..], params![])?;
+        tx.commit()?;
+
+        Ok(true)
     }
 }
 
