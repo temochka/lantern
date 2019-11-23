@@ -6,6 +6,7 @@ use rusqlite::types::{FromSql, ValueRef, FromSqlResult, ToSql};
 use serde::{Serialize, Deserialize};
 use serde_json;
 use std::collections::{HashMap};
+use std::sync::Mutex;
 use futures::future::Future;
 
 #[derive(Serialize)]
@@ -24,6 +25,7 @@ impl FromSql for JsonValue {
 
 struct LanternConnection {
     db_addr: actix::prelude::Addr<LanternDb>,
+    live_queries: LiveQueries
 }
 
 #[derive(Debug)]
@@ -37,10 +39,17 @@ struct Migration {
 type QueryArguments = HashMap<String, String>;
 
 #[derive(Deserialize)]
+#[derive(Clone)]
+struct LiveQueries(HashMap<String, DbQuery>);
+
+type LiveResults = HashMap<String, serde_json::Value>;
+
+#[derive(Deserialize)]
 #[serde(tag = "type")]
 enum Request {
     Echo { id: String, text: String },
     Query { id: String, query: String, arguments: QueryArguments },
+    LiveQuery { id: String, queries: LiveQueries },
     Migration { id: String, ddl: String }
 }
 
@@ -49,6 +58,7 @@ enum Request {
 enum Response {
     Echo { id: String, text: String },
     Query { id: String, results: serde_json::Value },
+    LiveQuery { id: String, results: LiveResults },
     Migration { id: String },
     Error { id: String, text: String },
     ChannelError { message: String },
@@ -94,6 +104,16 @@ impl LanternConnection {
                             Ok(result) => Response::Query { id: id, results: result },
                             Err(error) => Response::Error { id: id, text: format!("{}", error) }
                         }
+                    },
+                    Request::LiveQuery { id, queries } => {
+                        self.live_queries = queries.clone();
+
+                        let result = self.db_addr.send(queries).wait().unwrap();
+
+                        match result {
+                            Ok(results) => Response::LiveQuery { id: id, results: results },
+                            Err(error) => Response::Error { id: id, text: format!("{}", error) }
+                        }
                     }
                 }
             }
@@ -106,6 +126,34 @@ struct LanternDb {
     connection: Connection
 }
 
+impl LanternDb {
+    fn run_query(&self, query: &DbQuery) -> rusqlite::Result<serde_json::Value> {
+        let mut stmt = self.connection.prepare(&query.query)?;
+        let arguments: Vec<_> = query.arguments.iter().map(|(name, val)| (&name[..], val as &dyn ToSql)).collect();
+        let results = stmt.query_map_named(&arguments[..], |row| self.parse_row(row)).and_then(|r| r.collect())?;
+
+        Ok(serde_json::Value::Array(results))
+    }
+
+    fn run_live_queries(&self, LiveQueries(live_queries): &LiveQueries) -> rusqlite::Result<LiveResults> {
+        live_queries.iter().map(|(name,query)| self.run_query(query).map(|r| (name.clone(), r))).collect()
+    }
+
+    fn parse_row(&self, row: &rusqlite::Row) -> rusqlite::Result<serde_json::Value> {
+        row
+            .columns()
+            .iter()
+            .enumerate()
+            .map(|(i, col)| Ok((col.name().to_string(), row.get::<_, JsonValue>(i).map(|JsonValue(v)| v)?)))
+            .collect::<Result<serde_json::Map<String, serde_json::Value>, _>>()
+            .map(|r| serde_json::Value::Object(r))
+    }
+    
+    
+}
+
+#[derive(Deserialize)]
+#[derive(Clone)]
 struct DbQuery {
     query: String,
     arguments: QueryArguments
@@ -123,6 +171,9 @@ impl actix::Message for DbMigration {
     type Result = Result<bool, rusqlite::Error>;
 }
 
+impl actix::Message for LiveQueries {
+    type Result = Result<LiveResults, rusqlite::Error>;
+}
 
 impl Actor for LanternDb {
     type Context = actix::prelude::Context<Self>;
@@ -142,27 +193,13 @@ impl Actor for LanternDb {
     }
 }
 
-fn parse_row(row: & rusqlite::Row) -> rusqlite::Result<serde_json::Value> {
-    row
-        .columns()
-        .iter()
-        .enumerate()
-        .map(|(i, col)| Ok((col.name().to_string(), row.get::<_, JsonValue>(i).map(|JsonValue(v)| v)?)))
-        .collect::<Result<serde_json::Map<String, serde_json::Value>, _>>()
-        .map(|r| serde_json::Value::Object(r))
-}
-
 impl actix::Handler<DbQuery> for LanternDb {
     type Result = Result<serde_json::Value, rusqlite::Error>;
 
     fn handle(&mut self, msg: DbQuery, _ctx: &mut actix::prelude::Context<Self>) -> Self::Result {
         println!("Query received: {}", msg.query);
 
-        let mut stmt = self.connection.prepare(&msg.query)?;
-        let arguments: Vec<_> = msg.arguments.iter().map(|(name, val)| (&name[..], val as &dyn ToSql)).collect();
-        let results = stmt.query_map_named(&arguments[..], |row| parse_row(row)).and_then(|r| r.collect())?;
-
-        Ok(serde_json::Value::Array(results))
+        self.run_query(&msg)
     }
 }
 
@@ -181,9 +218,18 @@ impl actix::Handler<DbMigration> for LanternDb {
     }
 }
 
-#[derive(Clone)]
+impl actix::Handler<LiveQueries> for LanternDb {
+    type Result = Result<LiveResults, rusqlite::Error>;
+
+    fn handle(&mut self, msg: LiveQueries, _ctx: &mut actix::prelude::Context<Self>) -> Self::Result {
+        self.run_live_queries(&msg)
+    }
+}
+
+
 struct LanternServer {
     db_addr: actix::prelude::Addr<LanternDb>,
+    clients: Mutex<Vec<actix::prelude::Addr<LanternConnection>>>
 }
 
 fn index() -> impl Responder {
@@ -191,7 +237,7 @@ fn index() -> impl Responder {
 }
 
 fn async_api(req: HttpRequest, stream: web::Payload, data: web::Data<LanternServer>) -> Result<HttpResponse, Error> {
-    let resp = ws::start(LanternConnection { db_addr: data.db_addr.clone() }, &req, stream);
+    let resp = ws::start(LanternConnection { db_addr: data.db_addr.clone(), live_queries : LiveQueries(vec![].into_iter().collect()) }, &req, stream);
     println!("{:?}", resp);
     resp
 }
@@ -202,7 +248,9 @@ fn main() {
         let conn = Connection::open_in_memory().unwrap();
         LanternDb { connection : conn }
     });
-    let server = LanternServer { db_addr: addr };
+    let server = web::Data::new(
+        LanternServer { db_addr: addr, clients: Mutex::new(vec![]) }
+    );
 
     HttpServer::new(move || {
         App::new()
