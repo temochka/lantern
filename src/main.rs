@@ -226,7 +226,6 @@ impl actix::Handler<LiveQueries> for LanternDb {
     }
 }
 
-
 struct LanternServer {
     db_addr: actix::prelude::Addr<LanternDb>,
     clients: Mutex<Vec<actix::prelude::Addr<LanternConnection>>>
@@ -249,12 +248,15 @@ fn main() {
         LanternDb { connection : conn }
     });
     let server = web::Data::new(
-        LanternServer { db_addr: addr, clients: Mutex::new(vec![]) }
+        LanternServer {
+            db_addr: addr,
+            clients: Mutex::new(vec![])
+        }
     );
 
     HttpServer::new(move || {
         App::new()
-            .data(server.clone())
+            .register_data(server.clone())
             .route("/", web::get().to(index))
             .route("/_api/async", web::get().to(async_api))
     })
