@@ -18,23 +18,31 @@ impl FromSql for JsonValue {
     }
 }
 
-
-
 pub struct LanternDb {
     pub connection: Connection
 }
 
 impl LanternDb {
-    fn run_query(&self, query: &DbQuery) -> rusqlite::Result<serde_json::Value> {
+    fn run_reader_query(&self, query: &ReaderQuery) -> rusqlite::Result<serde_json::Value> {
         let mut stmt = self.connection.prepare(&query.query)?;
-        let arguments: Vec<_> = query.arguments.iter().map(|(name, val)| (&name[..], val as &dyn ToSql)).collect();
-        let results = stmt.query_map_named(&arguments[..], |row| self.parse_row(row)).and_then(|r| r.collect())?;
+        let results = stmt
+            .query_map_named(&self.arguments_to_named_params(&query.arguments)[..], |row| self.parse_row(row))
+            .and_then(|r| r.collect())?;
 
         Ok(serde_json::Value::Array(results))
     }
 
+    fn run_writer_query(&self, query: &WriterQuery) -> rusqlite::Result<WriterQueryResult> {
+        let changed_rows = self.connection.execute_named(&query.query, &self.arguments_to_named_params(&query.arguments)[..])?;
+
+        Ok(WriterQueryResult { changed_rows: changed_rows, last_insert_rowid: self.connection.last_insert_rowid() })
+    }
+
     fn run_live_queries(&self, LiveQueries(live_queries): &LiveQueries) -> rusqlite::Result<LiveResults> {
-        let results: rusqlite::Result<HashMap<_, _>> = live_queries.iter().map(|(name,query)| self.run_query(query).map(|r| (name.clone(), r))).collect();
+        let results: rusqlite::Result<HashMap<_, _>> = live_queries
+            .iter()
+            .map(|(name,query)| self.run_reader_query(query).map(|r| (name.clone(), r)))
+            .collect();
         results.map(|results| LiveResults(results))
     }
 
@@ -47,11 +55,22 @@ impl LanternDb {
             .collect::<Result<serde_json::Map<String, serde_json::Value>, _>>()
             .map(|r| serde_json::Value::Object(r))
     }
+
+    fn arguments_to_named_params<'a>(&self, arguments: &'a QueryArguments) -> Vec<(&'a str, &'a dyn ToSql)> {
+        arguments.iter().map(|(name, val)| (&name[..], val as &dyn ToSql)).collect()
+    }
 }
 
 #[derive(Deserialize)]
 #[derive(Clone)]
-pub struct DbQuery {
+pub struct ReaderQuery {
+    pub query: String,
+    pub arguments: QueryArguments
+}
+
+#[derive(Deserialize)]
+#[derive(Clone)]
+pub struct WriterQuery {
     pub query: String,
     pub arguments: QueryArguments
 }
@@ -62,15 +81,25 @@ pub struct DbMigration {
     pub query: String
 }
 
+#[derive(Serialize)]
+pub struct WriterQueryResult {
+    pub changed_rows: usize,
+    pub last_insert_rowid: i64,
+}
+
 #[derive(Deserialize)]
 #[derive(Clone)]
-pub struct LiveQueries(pub HashMap<String, DbQuery>);
+pub struct LiveQueries(pub HashMap<String, ReaderQuery>);
 
 #[derive(Serialize)]
 pub struct LiveResults(HashMap<String, serde_json::Value>);
 
-impl actix::Message for DbQuery {
+impl actix::Message for ReaderQuery {
     type Result = Result<serde_json::Value, rusqlite::Error>;
+}
+
+impl actix::Message for WriterQuery {
+    type Result = Result<WriterQueryResult, rusqlite::Error>;
 }
 
 impl actix::Message for DbMigration {
@@ -103,13 +132,23 @@ impl Actor for LanternDb {
     }
 }
 
-impl actix::Handler<DbQuery> for LanternDb {
+impl actix::Handler<ReaderQuery> for LanternDb {
     type Result = Result<serde_json::Value, rusqlite::Error>;
 
-    fn handle(&mut self, msg: DbQuery, _ctx: &mut actix::prelude::Context<Self>) -> Self::Result {
+    fn handle(&mut self, msg: ReaderQuery, _ctx: &mut actix::prelude::Context<Self>) -> Self::Result {
         println!("Query received: {}", msg.query);
 
-        self.run_query(&msg)
+        self.run_reader_query(&msg)
+    }
+}
+
+impl actix::Handler<WriterQuery> for LanternDb {
+    type Result = Result<WriterQueryResult, rusqlite::Error>;
+
+    fn handle(&mut self, msg: WriterQuery, _ctx: &mut actix::prelude::Context<Self>) -> Self::Result {
+        println!("Query received: {}", msg.query);
+
+        self.run_writer_query(&msg)
     }
 }
 
@@ -127,7 +166,6 @@ impl actix::Handler<DbMigration> for LanternDb {
         Ok(true)
     }
 }
-
 
 impl actix::Handler<LiveQueries> for LanternDb {
     type Result = Result<LiveResults, rusqlite::Error>;

@@ -30,7 +30,8 @@ struct Migration {
 #[serde(tag = "type")]
 enum Request {
     Echo { id: String, text: String },
-    Query { id: String, query: String, arguments: db::QueryArguments },
+    ReaderQuery { id: String, query: db::ReaderQuery },
+    WriterQuery { id: String, query: db::WriterQuery },
     LiveQuery { id: String, queries: db::LiveQueries },
     Migration { id: String, ddl: String }
 }
@@ -40,7 +41,8 @@ enum Request {
 #[serde(tag = "type")]
 enum Response {
     Echo { id: String, text: String },
-    Query { id: String, results: serde_json::Value },
+    ReaderQuery { id: String, results: serde_json::Value },
+    WriterQuery { id: String, results: db::WriterQueryResult },
     LiveQuery { id: String, results: db::LiveResults },
     Migration { id: String },
     Error { id: String, text: String },
@@ -95,11 +97,22 @@ impl StreamHandler<ws::Message, ws::ProtocolError> for LanternConnection {
                                     Err(error) => Response::Error { id: id, text: format!("{}", error) }
                                 }
                             },
-                            Request::Query { id, query, arguments } => {
-                                let result = self.db_addr.send(db::DbQuery { query, arguments }).wait().unwrap();
-        
+                            Request::ReaderQuery { id, query } => {
+                                let result = self.db_addr.send(query).wait().unwrap();
+
                                 match result {
-                                    Ok(result) => Response::Query { id: id, results: result },
+                                    Ok(result) => Response::ReaderQuery { id: id, results: result },
+                                    Err(error) => Response::Error { id: id, text: format!("{}", error) }
+                                }
+                            },
+                            Request::WriterQuery { id, query } => {
+                                let result = self.db_addr.send(query).wait().unwrap();
+
+                                match result {
+                                    Ok(result) => {
+                                        ctx.address().do_send(LiveQueryRefresh {});
+                                        Response::WriterQuery { id: id, results: result }
+                                    },
                                     Err(error) => Response::Error { id: id, text: format!("{}", error) }
                                 }
                             },
