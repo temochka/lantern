@@ -15,6 +15,7 @@ struct LiveQueryRefresh;
 
 struct LanternConnection {
     db_addr: actix::prelude::Addr<db::LanternDb>,
+    live_query_response_id: String,
     live_queries: db::LiveQueries,
 }
 
@@ -64,8 +65,8 @@ impl actix::prelude::Handler<LiveQueryRefresh> for LanternConnection {
     fn handle(&mut self, _msg: LiveQueryRefresh, ctx: &mut Self::Context) {
         let result = self.db_addr.send(self.live_queries.clone()).wait().unwrap();
         let response = match result {
-            Ok(results) => Response::LiveQuery { id: "LiveQuery".to_string(), results: results },
-            Err(error) => Response::Error { id: "LiveQuery".to_string(), text: format!("{}", error) }
+            Ok(results) => Response::LiveQuery { id: self.live_query_response_id.clone(), results: results },
+            Err(error) => Response::Error { id: self.live_query_response_id.clone(), text: format!("{}", error) }
         };
 
         ctx.address().do_send(response);
@@ -118,6 +119,7 @@ impl StreamHandler<ws::Message, ws::ProtocolError> for LanternConnection {
                             },
                             Request::LiveQuery { id, queries } => {
                                 self.live_queries = queries.clone();
+                                self.live_query_response_id = id.clone();
         
                                 let result = self.db_addr.send(queries).wait().unwrap();
         
@@ -143,7 +145,7 @@ fn index() -> impl Responder {
 }
 
 fn async_api(req: HttpRequest, stream: web::Payload, data: web::Data<GlobalState>) -> Result<HttpResponse, Error> {
-    let resp = ws::start(LanternConnection { db_addr: data.db_addr.clone(), live_queries : db::LiveQueries(HashMap::new()) }, &req, stream);
+    let resp = ws::start(LanternConnection { db_addr: data.db_addr.clone(), live_query_response_id : format!(""), live_queries : db::LiveQueries(HashMap::new()) }, &req, stream);
     println!("{:?}", resp);
     resp
 }
