@@ -1,5 +1,6 @@
 use actix::*;
 use actix::prelude::AsyncContext;
+use actix_files as fs;
 use actix_web::cookie::Cookie;
 use actix_web::{web, error, App, Error, HttpRequest, HttpResponse, HttpMessage, HttpServer};
 use actix_web_actors::ws;
@@ -15,15 +16,16 @@ use std::iter;
 use std::env;
 use futures::future::{Future};
 
-mod db;
+mod lantern_db;
+mod user_db;
 
 #[derive(actix::prelude::Message)]
 struct LiveQueryRefresh;
 
 struct LanternConnection {
-    db_addr: actix::prelude::Addr<db::LanternDb>,
+    db_addr: actix::prelude::Addr<user_db::UserDb>,
     live_query_response_id: String,
-    live_queries: db::LiveQueries,
+    live_queries: user_db::LiveQueries,
     authenticated: bool,
 }
 
@@ -50,9 +52,9 @@ struct AuthResponse {
 enum WsRequest {
     Nop { id: String },
     Echo { id: String, text: String },
-    ReaderQuery { id: String, query: db::ReaderQuery },
-    WriterQuery { id: String, query: db::WriterQuery },
-    LiveQuery { id: String, queries: db::LiveQueries },
+    ReaderQuery { id: String, query: user_db::ReaderQuery },
+    WriterQuery { id: String, query: user_db::WriterQuery },
+    LiveQuery { id: String, queries: user_db::LiveQueries },
     Migration { id: String, ddl: String }
 }
 
@@ -65,8 +67,8 @@ enum WsResponse {
     FatalError { id: String, error: String, message: String },
     Echo { id: String, text: String },
     ReaderQuery { id: String, results: serde_json::Value },
-    WriterQuery { id: String, results: db::WriterQueryResult },
-    LiveQuery { id: String, results: db::LiveResults },
+    WriterQuery { id: String, results: user_db::WriterQueryResult },
+    LiveQuery { id: String, results: user_db::LiveResults },
     Migration { id: String },
     Error { id: String, text: String },
     ChannelError { message: String },
@@ -126,7 +128,7 @@ impl StreamHandler<ws::Message, ws::ProtocolError> for LanternConnection {
                             WsRequest::Nop { id } => WsResponse::Nop { id: id },
                             WsRequest::Echo { id, text } => WsResponse::Echo { id: id, text: text },
                             WsRequest::Migration { id, ddl } => {
-                                let result = self.db_addr.send(db::DbMigration { query: ddl }).wait().unwrap();
+                                let result = self.db_addr.send(user_db::DbMigration { query: ddl }).wait().unwrap();
         
                                 match result {
                                     Ok(_) => {
@@ -178,10 +180,6 @@ impl StreamHandler<ws::Message, ws::ProtocolError> for LanternConnection {
     }
 }
 
-fn index(_req: HttpRequest) -> actix_web::Result<web::HttpResponse> {
-    Ok(HttpResponse::Ok().body("Hello world!"))
-}
-
 fn auth(req: web::Json<AuthRequest>, data: web::Data<GlobalState>) -> actix_web::Result<web::HttpResponse> {
     if is_valid_password(&req.password, &data.password_salt, &data.password_hash) {
         let started_at = chrono::prelude::Utc::now();
@@ -191,8 +189,8 @@ fn auth(req: web::Json<AuthRequest>, data: web::Data<GlobalState>) -> actix_web:
             .path("/")
             .http_only(true)
             .finish();
-        data.db_addr
-            .send(db::queries::CreateSession { session_token: token, started_at, expires_at })
+        data.lantern_db_addr
+            .send(lantern_db::queries::CreateSession { session_token: token, started_at, expires_at })
             .wait()
             .unwrap()
             .map_err(|e| {
@@ -213,8 +211,8 @@ fn auth(req: web::Json<AuthRequest>, data: web::Data<GlobalState>) -> actix_web:
 
 fn ws_api(req: HttpRequest, stream: web::Payload, data: web::Data<GlobalState>) -> Result<HttpResponse, Error> {
     let session_token = req.cookie("lantern_session").map(|cookie| cookie.value().to_string()).unwrap_or("".to_string());
-    let session = data.db_addr
-        .send(db::queries::LookupActiveSession { session_token: session_token, now: chrono::Utc::now() })
+    let session = data.lantern_db_addr
+        .send(lantern_db::queries::LookupActiveSession { session_token: session_token, now: chrono::Utc::now() })
         .wait()
         .unwrap()
         .map_err(|original_error| {
@@ -224,9 +222,9 @@ fn ws_api(req: HttpRequest, stream: web::Payload, data: web::Data<GlobalState>) 
 
     let resp = ws::start(
         LanternConnection {
-            db_addr: data.db_addr.clone(),
+            db_addr: data.user_db_addr.clone(),
             live_query_response_id : format!(""),
-            live_queries : db::LiveQueries(HashMap::new()),
+            live_queries : user_db::LiveQueries(HashMap::new()),
             authenticated: session.is_some(),
         },
         &req,
@@ -237,7 +235,8 @@ fn ws_api(req: HttpRequest, stream: web::Payload, data: web::Data<GlobalState>) 
 }
 
 struct GlobalState {
-    db_addr: actix::prelude::Addr<db::LanternDb>,
+    lantern_db_addr: actix::prelude::Addr<lantern_db::LanternDb>,
+    user_db_addr: actix::prelude::Addr<user_db::UserDb>,
     password_hash: String,
     password_salt: String,
 }
@@ -258,11 +257,21 @@ fn random_token(length: usize) -> String {
         .collect()
 }
 
+fn init_lantern() -> std::io::Result<()> {
+    std::fs::create_dir_all(".lantern/migrations")?;
+    Ok(())
+}
+
 fn main() {
+    init_lantern().unwrap();
     let sys = actix::System::new("Lantern");
-    let db_addr = db::LanternDb::create(|_| {
-        let conn = Connection::open_in_memory().unwrap();
-        db::LanternDb { connection : conn }
+    let user_db_addr = user_db::UserDb::create(|_| {
+        let conn = Connection::open(".lantern/user.sqlite3").unwrap();
+        user_db::UserDb { connection : conn }
+    });
+    let lantern_db_addr = lantern_db::LanternDb::create(|_| {
+        let conn = Connection::open(".lantern/lantern.sqlite3").unwrap();
+        lantern_db::LanternDb { connection : conn }
     });
     let env_password = env::var("LANTERN_PASSWORD").ok();
     if !env_password.is_some() {
@@ -271,7 +280,8 @@ fn main() {
     let password = env_password.unwrap_or(random_token(128));
     let salt = random_token(32);
     let global_state = web::Data::new(GlobalState {
-        db_addr: db_addr,
+        user_db_addr: user_db_addr,
+        lantern_db_addr: lantern_db_addr,
         password_hash: hash_password(&password, &salt),
         password_salt: salt,
     });
@@ -279,9 +289,9 @@ fn main() {
     HttpServer::new(move || {
         App::new()
             .register_data(global_state.clone())
-            .route("/", web::get().to(index))
             .route("/_api/auth", web::post().to(auth))
             .route("/_api/ws", web::get().to(ws_api))
+            .service(fs::Files::new("/", ".").index_file("index.html"))
     })
         .bind("127.0.0.1:4666")
         .unwrap()

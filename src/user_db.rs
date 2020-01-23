@@ -1,11 +1,8 @@
 use actix::{Actor};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 use rusqlite::types::{FromSql, ValueRef, FromSqlResult, ToSql};
 use serde::{Serialize, Deserialize};
 use std::collections::{HashMap};
-
-pub mod entities;
-pub mod queries;
 
 #[derive(Serialize)]
 struct JsonValue(serde_json::Value);
@@ -21,11 +18,11 @@ impl FromSql for JsonValue {
     }
 }
 
-pub struct LanternDb {
+pub struct UserDb {
     pub connection: Connection
 }
 
-impl LanternDb {
+impl UserDb {
     fn run_reader_query(&self, query: &ReaderQuery) -> rusqlite::Result<serde_json::Value> {
         let mut stmt = self.connection.prepare(&query.query)?;
         let results = stmt
@@ -39,22 +36,6 @@ impl LanternDb {
         let changed_rows = self.connection.execute_named(&query.query, &self.arguments_to_named_params(&query.arguments)[..])?;
 
         Ok(WriterQueryResult { changed_rows: changed_rows, last_insert_rowid: self.connection.last_insert_rowid() })
-    }
-
-    fn create_session(&self, query: &queries::CreateSession) -> rusqlite::Result<()>
-    {
-        let mut stmt = self.connection.prepare("INSERT INTO lantern_sessions (session_token, started_at, expires_at) VALUES (?, ?, ?)")?;
-        stmt.insert(params![query.session_token.clone(), query.started_at, query.expires_at])?;
-
-        Ok(())
-    }
-
-    fn lookup_active_session(&self, query: &queries::LookupActiveSession) -> rusqlite::Result<Option<entities::Session>> {
-        let mut stmt = self.connection.prepare("SELECT id, session_token, started_at, expires_at FROM lantern_sessions WHERE session_token=? AND expires_at > ? LIMIT 1")?;
-        stmt.query_row(
-            params![query.session_token.clone(), query.now],
-            |row| Ok(entities::Session { id: row.get(0)?, session_token: row.get(1)?, started_at: row.get(2)?, expires_at: row.get(3)? })
-        ).optional()
     }
 
     fn run_live_queries(&self, LiveQueries(live_queries): &LiveQueries) -> rusqlite::Result<LiveResults> {
@@ -133,34 +114,13 @@ impl actix::Message for LiveResults {
     type Result = Result<(), serde_json::Error>;
 }
 
-impl actix::Message for queries::CreateSession {
-    type Result = rusqlite::Result<()>;
-}
-
-impl actix::Message for queries::LookupActiveSession {
-    type Result = rusqlite::Result<Option<entities::Session>>;
-}
-
-impl Actor for LanternDb {
+impl Actor for UserDb {
     type Context = actix::prelude::Context<Self>;
 
     fn started(&mut self, _ctx: &mut Self::Context) {
         self.connection.execute(
-            "CREATE TABLE lantern_migrations (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                app_version     INTEGER NOT NULL DEFAULT 0,
-                batch_order     INTEGER NOT NULL DEFAULT 0,
-                statement       TEXT NOT NULL
-            )",
-            params![],
-        ).unwrap();
-
-        self.connection.execute(
-            "CREATE TABLE lantern_sessions (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_token   VARCHAR(255) NOT NULL,
-                started_at      DATETIME NOT NULL,
-                expires_at      DATETIME NOT NULL
+            "CREATE TABLE IF NOT EXISTS schema_migrations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT
             )",
             params![],
         ).unwrap();
@@ -169,7 +129,7 @@ impl Actor for LanternDb {
     }
 }
 
-impl actix::Handler<ReaderQuery> for LanternDb {
+impl actix::Handler<ReaderQuery> for UserDb {
     type Result = Result<serde_json::Value, rusqlite::Error>;
 
     fn handle(&mut self, msg: ReaderQuery, _ctx: &mut actix::prelude::Context<Self>) -> Self::Result {
@@ -179,7 +139,7 @@ impl actix::Handler<ReaderQuery> for LanternDb {
     }
 }
 
-impl actix::Handler<WriterQuery> for LanternDb {
+impl actix::Handler<WriterQuery> for UserDb {
     type Result = Result<WriterQueryResult, rusqlite::Error>;
 
     fn handle(&mut self, msg: WriterQuery, _ctx: &mut actix::prelude::Context<Self>) -> Self::Result {
@@ -189,38 +149,19 @@ impl actix::Handler<WriterQuery> for LanternDb {
     }
 }
 
-impl actix::Handler<queries::CreateSession> for LanternDb {
-    type Result = rusqlite::Result<()>;
-
-    fn handle(&mut self, msg: queries::CreateSession, _ctx: &mut actix::prelude::Context<Self>) -> Self::Result {
-        self.create_session(&msg)
-    }
-}
-
-impl actix::Handler<queries::LookupActiveSession> for LanternDb {
-    type Result = rusqlite::Result<Option<entities::Session>>;
-
-    fn handle(&mut self, msg: queries::LookupActiveSession, _ctx: &mut actix::prelude::Context<Self>) -> Self::Result {
-        self.lookup_active_session(&msg)
-    }
-}
-
-impl actix::Handler<DbMigration> for LanternDb {
+impl actix::Handler<DbMigration> for UserDb {
     type Result = Result<bool, rusqlite::Error>;
 
     fn handle(&mut self, msg: DbMigration, _ctx: &mut actix::prelude::Context<Self>) -> Self::Result {
         println!("Migration received: {}", msg.query);
 
-        let tx = self.connection.transaction()?;
-        tx.execute("INSERT INTO lantern_migrations (statement) VALUES (?)", params![msg.query])?;
-        tx.execute(&msg.query[..], params![])?;
-        tx.commit()?;
+        self.connection.execute(&msg.query[..], params![])?;
 
         Ok(true)
     }
 }
 
-impl actix::Handler<LiveQueries> for LanternDb {
+impl actix::Handler<LiveQueries> for UserDb {
     type Result = Result<LiveResults, rusqlite::Error>;
 
     fn handle(&mut self, msg: LiveQueries, _ctx: &mut actix::prelude::Context<Self>) -> Self::Result {
