@@ -19,7 +19,7 @@ impl FromSql for JsonValue {
 }
 
 pub struct UserDb {
-    pub connection: Connection
+    pub connection: Connection,
 }
 
 impl UserDb {
@@ -44,6 +44,13 @@ impl UserDb {
             .map(|(name,query)| self.run_reader_query(query).map(|r| (name.clone(), r)))
             .collect();
         results.map(|results| LiveResults(results))
+    }
+
+    fn dump_schema(&self) -> rusqlite::Result<String> {
+        let mut stmt = self.connection.prepare("SELECT sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name")?;
+        let result: rusqlite::Result<Vec<String>> = stmt.query_map(rusqlite::NO_PARAMS, |row| row.get(0))?.collect();
+
+        result.map(|rows| rows.iter().fold("".to_string(), |acc, schema| acc + schema + ";\n\n"))
     }
 
     fn parse_row(&self, row: &rusqlite::Row) -> rusqlite::Result<serde_json::Value> {
@@ -81,6 +88,8 @@ pub struct DbMigration {
     pub query: String
 }
 
+pub struct SchemaDump {}
+
 #[derive(Serialize)]
 pub struct WriterQueryResult {
     pub changed_rows: usize,
@@ -112,6 +121,10 @@ impl actix::Message for LiveQueries {
 
 impl actix::Message for LiveResults {
     type Result = Result<(), serde_json::Error>;
+}
+
+impl actix::Message for SchemaDump {
+    type Result = rusqlite::Result<String>;
 }
 
 impl Actor for UserDb {
@@ -166,5 +179,13 @@ impl actix::Handler<LiveQueries> for UserDb {
 
     fn handle(&mut self, msg: LiveQueries, _ctx: &mut actix::prelude::Context<Self>) -> Self::Result {
         self.run_live_queries(&msg)
+    }
+}
+
+impl actix::Handler<SchemaDump> for UserDb {
+    type Result = rusqlite::Result<String>;
+
+    fn handle(&mut self, _msg: SchemaDump, _ctx: &mut actix::prelude::Context<Self>) -> Self::Result {
+        self.dump_schema()
     }
 }

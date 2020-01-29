@@ -12,6 +12,8 @@ use scrypt::{ScryptParams};
 use serde::{Serialize, Deserialize};
 use serde_json;
 use std::collections::{HashMap};
+use std::fs::File;
+use std::io::prelude::*;
 use std::iter;
 use std::env;
 use futures::future::{Future};
@@ -128,13 +130,25 @@ impl StreamHandler<ws::Message, ws::ProtocolError> for LanternConnection {
                             WsRequest::Nop { id } => WsResponse::Nop { id: id },
                             WsRequest::Echo { id, text } => WsResponse::Echo { id: id, text: text },
                             WsRequest::Migration { id, ddl } => {
-                                let result = self.db_addr.send(user_db::DbMigration { query: ddl }).wait().unwrap();
+                                let ddl_copy = ddl.clone();
+                                let result =
+                                    self
+                                        .db_addr
+                                        .send(user_db::DbMigration { query: ddl })
+                                        .wait()
+                                        .unwrap()
+                                        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, format!("{}", err)))
+                                        .and_then(|_| {
+                                            ctx.address().do_send(LiveQueryRefresh {});
+                                            save_migration(ddl_copy)
+                                        })
+                                        .and_then(|_| {
+                                            let schema = self.db_addr.send(user_db::SchemaDump {}).wait().unwrap().unwrap();
+                                            dump_schema(schema)
+                                        });
         
                                 match result {
-                                    Ok(_) => {
-                                        ctx.address().do_send(LiveQueryRefresh {});
-                                        WsResponse::Migration { id: id }
-                                    },
+                                    Ok(_) => WsResponse::Migration { id: id },
                                     Err(error) => WsResponse::Error { id: id, text: format!("{}", error) }
                                 }
                             },
@@ -258,7 +272,22 @@ fn random_token(length: usize) -> String {
 }
 
 fn init_lantern() -> std::io::Result<()> {
-    std::fs::create_dir_all(".lantern/migrations")?;
+    std::fs::create_dir_all(".schema/migrations")?;
+    std::fs::create_dir_all(".lantern")?;
+    Ok(())
+}
+
+fn save_migration(ddl: String) -> std::io::Result<()> {
+    let timestamp = chrono::Utc::now();
+    let filename = timestamp.format("%Y%m%d%H%M%S_migration.sql");
+    let mut file = File::create(format!(".schema/migrations/{}", filename))?;
+    file.write_all(ddl.as_bytes())?;
+    Ok(())
+}
+
+fn dump_schema(schema: String) -> std::io::Result<()> {
+    let mut file = File::create(".schema/schema.sql")?;
+    file.write_all(schema.as_bytes())?;
     Ok(())
 }
 
