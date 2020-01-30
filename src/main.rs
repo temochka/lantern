@@ -130,17 +130,17 @@ impl StreamHandler<ws::Message, ws::ProtocolError> for LanternConnection {
                             WsRequest::Nop { id } => WsResponse::Nop { id: id },
                             WsRequest::Echo { id, text } => WsResponse::Echo { id: id, text: text },
                             WsRequest::Migration { id, ddl } => {
-                                let ddl_copy = ddl.clone();
+                                let migration = user_db::DbMigration::new(ddl);
                                 let result =
                                     self
                                         .db_addr
-                                        .send(user_db::DbMigration { query: ddl })
+                                        .send(migration.clone())
                                         .wait()
                                         .unwrap()
                                         .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, format!("{}", err)))
                                         .and_then(|_| {
                                             ctx.address().do_send(LiveQueryRefresh {});
-                                            save_migration(ddl_copy)
+                                            save_migration(migration)
                                         })
                                         .and_then(|_| {
                                             let schema = self.db_addr.send(user_db::SchemaDump {}).wait().unwrap().unwrap();
@@ -277,11 +277,9 @@ fn init_lantern() -> std::io::Result<()> {
     Ok(())
 }
 
-fn save_migration(ddl: String) -> std::io::Result<()> {
-    let timestamp = chrono::Utc::now();
-    let filename = timestamp.format("%Y%m%d%H%M%S_migration.sql");
-    let mut file = File::create(format!(".schema/migrations/{}", filename))?;
-    file.write_all(ddl.as_bytes())?;
+fn save_migration(migration: user_db::DbMigration) -> std::io::Result<()> {
+    let mut file = File::create(format!(".schema/migrations/{}.sql", migration.id))?;
+    file.write_all(migration.query.as_bytes())?;
     Ok(())
 }
 

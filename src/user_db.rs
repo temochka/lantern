@@ -84,8 +84,17 @@ pub struct WriterQuery {
 
 pub type QueryArguments = HashMap<String, String>;
 
+#[derive(Clone)]
 pub struct DbMigration {
-    pub query: String
+    pub query: String,
+    pub id: String,
+}
+
+impl DbMigration {
+    pub fn new(query: String) -> DbMigration {
+        let id = chrono::Utc::now().format("%Y%m%d%H%M%S").to_string().parse().unwrap();
+        DbMigration { query, id }
+    }
 }
 
 pub struct SchemaDump {}
@@ -133,7 +142,7 @@ impl Actor for UserDb {
     fn started(&mut self, _ctx: &mut Self::Context) {
         self.connection.execute(
             "CREATE TABLE IF NOT EXISTS schema_migrations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT
+                \"version\" INTEGER PRIMARY KEY NOT NULL
             )",
             params![],
         ).unwrap();
@@ -168,7 +177,10 @@ impl actix::Handler<DbMigration> for UserDb {
     fn handle(&mut self, msg: DbMigration, _ctx: &mut actix::prelude::Context<Self>) -> Self::Result {
         println!("Migration received: {}", msg.query);
 
-        self.connection.execute(&msg.query[..], params![])?;
+        let tx = self.connection.transaction()?;
+        tx.execute(&msg.query[..], params![])?;
+        tx.execute("INSERT INTO schema_migrations (version) VALUES (?)", params![&msg.id])?;
+        tx.commit()?;
 
         Ok(true)
     }
