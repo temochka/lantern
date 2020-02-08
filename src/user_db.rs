@@ -1,5 +1,5 @@
 use actix::{Actor};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use rusqlite::types::{FromSql, ValueRef, FromSqlResult, ToSql};
 use serde::{Serialize, Deserialize};
 use std::collections::{HashMap};
@@ -46,11 +46,54 @@ impl UserDb {
         results.map(|results| LiveResults(results))
     }
 
-    fn dump_schema(&self) -> rusqlite::Result<String> {
+    pub fn run_migration(&mut self, migration: &DbMigration) -> rusqlite::Result<bool> {
+        let tx = self.connection.transaction()?;
+        tx.execute(&migration.query, params![])?;
+        tx.execute("INSERT INTO schema_migrations (version) VALUES (?)", params![&migration.id])?;
+        tx.commit()?;
+
+        Ok(true)
+    }
+
+    pub fn track_migration(&mut self, id: i64) -> rusqlite::Result<usize> {
+        self.connection.execute("INSERT INTO schema_migrations (version) VALUES (?)", params![&id])
+    }
+
+    pub fn dump_schema(&self) -> rusqlite::Result<String> {
+        let version: i64 = self.connection.query_row(
+            "SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations",
+            rusqlite::NO_PARAMS,
+            |row| row.get(0)
+        )?;
+
         let mut stmt = self.connection.prepare("SELECT sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name")?;
         let result: rusqlite::Result<Vec<String>> = stmt.query_map(rusqlite::NO_PARAMS, |row| row.get(0))?.collect();
 
-        result.map(|rows| rows.iter().fold("".to_string(), |acc, schema| acc + schema + ";\n\n"))
+        result
+            .map(|rows| rows.iter().fold("".to_string(), |acc, schema| acc + schema + ";\n\n"))
+            .map(|schema| schema + &format!("INSERT INTO schema_migrations (version) VALUES ({});\n\n", version))
+    }
+
+    pub fn load_schema(&mut self, schema: &str) -> rusqlite::Result<()> {
+        self.connection.execute_batch(schema)?;
+        self.connection.execute(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (
+                \"version\" INTEGER PRIMARY KEY NOT NULL
+            )",
+            params![],
+        )?;
+        Ok(())
+    }
+
+    pub fn is_new_db(&self) -> rusqlite::Result<bool> {
+        let mut stmt = self.connection.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations';")?;
+        stmt.query_row(rusqlite::NO_PARAMS, |_| Ok(true)).optional().map(|opt| opt.is_none())
+    }
+
+    pub fn applied_migrations(&self) -> rusqlite::Result<Vec<i64>> {
+        let mut stmt = self.connection.prepare("SELECT version FROM schema_migrations ORDER BY version")?;
+        let result = stmt.query_map(rusqlite::NO_PARAMS, |row| row.get(0))?;
+        result.collect()
     }
 
     fn parse_row(&self, row: &rusqlite::Row) -> rusqlite::Result<serde_json::Value> {
@@ -140,12 +183,10 @@ impl Actor for UserDb {
     type Context = actix::prelude::Context<Self>;
 
     fn started(&mut self, _ctx: &mut Self::Context) {
-        self.connection.execute(
-            "CREATE TABLE IF NOT EXISTS schema_migrations (
-                \"version\" INTEGER PRIMARY KEY NOT NULL
-            )",
-            params![],
-        ).unwrap();
+
+        if self.is_new_db().unwrap() {
+            self.load_schema("").unwrap();
+        }
 
         println!("Connected to the database!")
     }
@@ -177,12 +218,7 @@ impl actix::Handler<DbMigration> for UserDb {
     fn handle(&mut self, msg: DbMigration, _ctx: &mut actix::prelude::Context<Self>) -> Self::Result {
         println!("Migration received: {}", msg.query);
 
-        let tx = self.connection.transaction()?;
-        tx.execute(&msg.query[..], params![])?;
-        tx.execute("INSERT INTO schema_migrations (version) VALUES (?)", params![&msg.id])?;
-        tx.commit()?;
-
-        Ok(true)
+        self.run_migration(&msg)
     }
 }
 

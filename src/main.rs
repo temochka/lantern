@@ -7,11 +7,12 @@ use actix_web_actors::ws;
 use chrono;
 use rand::{Rng};
 use rand::distributions::Alphanumeric;
+use regex::Regex;
 use rusqlite::{Connection};
 use scrypt::{ScryptParams};
 use serde::{Serialize, Deserialize};
 use serde_json;
-use std::collections::{HashMap};
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::prelude::*;
 use std::iter;
@@ -140,11 +141,11 @@ impl StreamHandler<ws::Message, ws::ProtocolError> for LanternConnection {
                                         .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, format!("{}", err)))
                                         .and_then(|_| {
                                             ctx.address().do_send(LiveQueryRefresh {});
-                                            save_migration(migration)
+                                            write_migration(migration)
                                         })
                                         .and_then(|_| {
                                             let schema = self.db_addr.send(user_db::SchemaDump {}).wait().unwrap().unwrap();
-                                            dump_schema(schema)
+                                            write_schema(schema)
                                         });
         
                                 match result {
@@ -277,13 +278,82 @@ fn init_lantern() -> std::io::Result<()> {
     Ok(())
 }
 
-fn save_migration(migration: user_db::DbMigration) -> std::io::Result<()> {
+fn list_migrations() -> std::io::Result<Vec<i64>> {
+    let regex = Regex::new(r"^(\d+)\.sql$").unwrap();
+
+    Ok(std::fs::read_dir(".schema/migrations")?
+        .filter_map(|result|
+            result
+                .ok()
+                .and_then(|entry| {
+                    let filename = entry.file_name();
+                    let filename_string = filename.to_str().unwrap();
+                    regex
+                        .captures(filename_string)
+                        .map(|captures| captures.get(1).unwrap().as_str().parse::<i64>().unwrap())
+                })
+        )
+        .collect()
+    )
+}
+
+fn read_migration(version: i64) -> std::io::Result<user_db::DbMigration> {
+    let sql = std::fs::read_to_string(format!(".schema/migrations/{}.sql", version))?;
+
+    Ok(user_db::DbMigration { id: version.to_string(), query: sql })
+}
+
+fn write_migration(migration: user_db::DbMigration) -> std::io::Result<()> {
     let mut file = File::create(format!(".schema/migrations/{}.sql", migration.id))?;
     file.write_all(migration.query.as_bytes())?;
     Ok(())
 }
 
-fn dump_schema(schema: String) -> std::io::Result<()> {
+fn rusqlite_error_to_io(error: rusqlite::Error) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Other, format!("{}", error))
+}
+
+fn update_db() -> std::io::Result<()> {
+    let conn = Connection::open(".lantern/user.sqlite3").map_err(rusqlite_error_to_io)?;
+    let mut user_db = user_db::UserDb { connection : conn };
+    let is_new_db = user_db.is_new_db().map_err(rusqlite_error_to_io)?;
+
+    if is_new_db {
+        let schema = read_schema()?;
+        user_db.load_schema(&schema).map_err(rusqlite_error_to_io)?;
+    }
+
+    let applied_migrations = user_db.applied_migrations().map_err(rusqlite_error_to_io)?;
+    let max_migration = applied_migrations.iter().cloned().max().unwrap_or(0);
+    let applied_migrations_set: HashSet<i64> = applied_migrations.iter().cloned().collect();
+    let all_migrations = list_migrations()?;
+
+    for version in all_migrations {
+        let applied = applied_migrations_set.contains(&version);
+
+        if applied {
+            continue;
+        } else if !applied && is_new_db && version < max_migration {
+            user_db.track_migration(version).map_err(rusqlite_error_to_io)?;
+        } else {
+            user_db.run_migration(&read_migration(version)?).map_err(rusqlite_error_to_io)?;
+        }
+    }
+
+    write_schema(user_db.dump_schema().map_err(rusqlite_error_to_io)?)?;
+
+    Ok(())
+}
+
+fn read_schema() -> std::io::Result<String> {
+    if std::fs::metadata(".schema/schema.sql").is_ok() {
+        std::fs::read_to_string(format!(".schema/schema.sql"))
+    } else {
+        Ok("".to_string())
+    }
+}
+
+fn write_schema(schema: String) -> std::io::Result<()> {
     let mut file = File::create(".schema/schema.sql")?;
     file.write_all(schema.as_bytes())?;
     Ok(())
@@ -291,6 +361,7 @@ fn dump_schema(schema: String) -> std::io::Result<()> {
 
 fn main() {
     init_lantern().unwrap();
+    update_db().unwrap();
     let sys = actix::System::new("Lantern");
     let user_db_addr = user_db::UserDb::create(|_| {
         let conn = Connection::open(".lantern/user.sqlite3").unwrap();
