@@ -111,15 +111,13 @@ impl UserDb {
     }
 }
 
-#[derive(Deserialize)]
-#[derive(Clone)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct ReaderQuery {
     pub query: String,
     pub arguments: QueryArguments
 }
 
-#[derive(Deserialize)]
-#[derive(Clone)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct WriterQuery {
     pub query: String,
     pub arguments: QueryArguments
@@ -127,7 +125,7 @@ pub struct WriterQuery {
 
 pub type QueryArguments = HashMap<String, String>;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DbMigration {
     pub query: String,
     pub id: String,
@@ -148,8 +146,7 @@ pub struct WriterQueryResult {
     pub last_insert_rowid: i64,
 }
 
-#[derive(Deserialize)]
-#[derive(Clone)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct LiveQueries(pub HashMap<String, ReaderQuery>);
 
 #[derive(Serialize)]
@@ -187,8 +184,6 @@ impl Actor for UserDb {
         if self.is_new_db().unwrap() {
             self.load_schema("").unwrap();
         }
-
-        println!("Connected to the database!")
     }
 }
 
@@ -196,9 +191,7 @@ impl actix::Handler<ReaderQuery> for UserDb {
     type Result = Result<serde_json::Value, rusqlite::Error>;
 
     fn handle(&mut self, msg: ReaderQuery, _ctx: &mut actix::prelude::Context<Self>) -> Self::Result {
-        println!("Query received: {}", msg.query);
-
-        self.run_reader_query(&msg)
+        self.run_reader_query(&dbg!(msg))
     }
 }
 
@@ -206,9 +199,7 @@ impl actix::Handler<WriterQuery> for UserDb {
     type Result = Result<WriterQueryResult, rusqlite::Error>;
 
     fn handle(&mut self, msg: WriterQuery, _ctx: &mut actix::prelude::Context<Self>) -> Self::Result {
-        println!("Query received: {}", msg.query);
-
-        self.run_writer_query(&msg)
+        self.run_writer_query(&dbg!(msg))
     }
 }
 
@@ -216,9 +207,7 @@ impl actix::Handler<DbMigration> for UserDb {
     type Result = Result<bool, rusqlite::Error>;
 
     fn handle(&mut self, msg: DbMigration, _ctx: &mut actix::prelude::Context<Self>) -> Self::Result {
-        println!("Migration received: {}", msg.query);
-
-        self.run_migration(&msg)
+        self.run_migration(&dbg!(msg))
     }
 }
 
@@ -226,7 +215,7 @@ impl actix::Handler<LiveQueries> for UserDb {
     type Result = Result<LiveResults, rusqlite::Error>;
 
     fn handle(&mut self, msg: LiveQueries, _ctx: &mut actix::prelude::Context<Self>) -> Self::Result {
-        self.run_live_queries(&msg)
+        self.run_live_queries(&dbg!(msg))
     }
 }
 

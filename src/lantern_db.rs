@@ -47,8 +47,6 @@ impl Actor for LanternDb {
             )",
             params![],
         ).unwrap();
-
-        println!("Connected to the database!")
     }
 }
 

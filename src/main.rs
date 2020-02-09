@@ -22,6 +22,8 @@ use futures::future::{Future};
 mod lantern_db;
 mod user_db;
 
+const VERSION: &'static str = env!("CARGO_PKG_VERSION");
+
 #[derive(actix::prelude::Message)]
 struct LiveQueryRefresh;
 
@@ -149,7 +151,7 @@ impl StreamHandler<ws::Message, ws::ProtocolError> for LanternConnection {
                                         .send(migration.clone())
                                         .wait()
                                         .unwrap()
-                                        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, format!("{}", err)))
+                                        .map_err(rusqlite_error_to_io)
                                         .and_then(|_| {
                                             ctx.address().do_send(LiveQueryRefresh {});
                                             write_migration(std::path::Path::new(&self.root_path), migration)
@@ -220,8 +222,7 @@ fn auth(req: web::Json<AuthRequest>, data: web::Data<GlobalState>) -> actix_web:
             .wait()
             .unwrap()
             .map_err(|e| {
-                println!("{:?}", e);
-                error::ErrorInternalServerError("Failed to start a new session.")
+                error::ErrorInternalServerError(format!("Failed to start a new session: {}", e))
             })?;
 
         Ok(HttpResponse::Ok()
@@ -241,9 +242,8 @@ fn ws_api(req: HttpRequest, stream: web::Payload, data: web::Data<GlobalState>) 
         .send(lantern_db::queries::LookupActiveSession { session_token: session_token, now: chrono::Utc::now() })
         .wait()
         .unwrap()
-        .map_err(|original_error| {
-            println!("{:?}", original_error);
-            error::ErrorInternalServerError("Failed to read session data.")
+        .map_err(|e| {
+            error::ErrorInternalServerError(format!("Failed to read session data: {}.", e))
         })?;
 
     let resp = ws::start(
@@ -257,7 +257,6 @@ fn ws_api(req: HttpRequest, stream: web::Payload, data: web::Data<GlobalState>) 
         &req,
         stream
     );
-    println!("{:?}", resp);
     resp
 }
 
@@ -378,6 +377,7 @@ fn main() {
     let cli_args: Vec<String> = env::args().collect();
     let path_arg = cli_args.get(1);
     if path_arg.is_none() {
+        println!("LANTERN v{}\n", VERSION);
         println!("Lantern is a lightweight web backend for personal productivity apps.\n");
         println!("Docs: https://github.com/temochka/lantern");
         println!("Usage:");
@@ -432,5 +432,6 @@ fn main() {
         .unwrap()
         .start();
 
+    println!("\n...lantern lit");
     sys.run().unwrap();
 }
