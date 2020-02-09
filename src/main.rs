@@ -30,6 +30,7 @@ struct LanternConnection {
     live_query_response_id: String,
     live_queries: user_db::LiveQueries,
     authenticated: bool,
+    root_path: String
 }
 
 #[derive(Debug)]
@@ -141,11 +142,11 @@ impl StreamHandler<ws::Message, ws::ProtocolError> for LanternConnection {
                                         .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, format!("{}", err)))
                                         .and_then(|_| {
                                             ctx.address().do_send(LiveQueryRefresh {});
-                                            write_migration(migration)
+                                            write_migration(std::path::Path::new(&self.root_path), migration)
                                         })
                                         .and_then(|_| {
                                             let schema = self.db_addr.send(user_db::SchemaDump {}).wait().unwrap().unwrap();
-                                            write_schema(schema)
+                                            write_schema(std::path::Path::new(&self.root_path), schema)
                                         });
         
                                 match result {
@@ -216,7 +217,7 @@ fn auth(req: web::Json<AuthRequest>, data: web::Data<GlobalState>) -> actix_web:
         Ok(HttpResponse::Ok()
             .cookie(cookie)
             .json(AuthResponse {
-                expires_at: "2020-04-01 00:00:00".to_string()
+                expires_at: expires_at.to_string()
             })
         )
     } else {
@@ -241,6 +242,7 @@ fn ws_api(req: HttpRequest, stream: web::Payload, data: web::Data<GlobalState>) 
             live_query_response_id : format!(""),
             live_queries : user_db::LiveQueries(HashMap::new()),
             authenticated: session.is_some(),
+            root_path: data.root_path.clone(),
         },
         &req,
         stream
@@ -254,6 +256,7 @@ struct GlobalState {
     user_db_addr: actix::prelude::Addr<user_db::UserDb>,
     password_hash: String,
     password_salt: String,
+    root_path: String,
 }
 
 fn hash_password(password: &str, salt: &str) -> String {
@@ -272,16 +275,16 @@ fn random_token(length: usize) -> String {
         .collect()
 }
 
-fn init_lantern() -> std::io::Result<()> {
-    std::fs::create_dir_all(".schema/migrations")?;
-    std::fs::create_dir_all(".lantern")?;
+fn init_lantern(root_path: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(root_path.join(".schema/migrations"))?;
+    std::fs::create_dir_all(root_path.join(".lantern"))?;
     Ok(())
 }
 
-fn list_migrations() -> std::io::Result<Vec<i64>> {
+fn list_migrations(root_path: &std::path::Path) -> std::io::Result<Vec<i64>> {
     let regex = Regex::new(r"^(\d+)\.sql$").unwrap();
 
-    Ok(std::fs::read_dir(".schema/migrations")?
+    Ok(std::fs::read_dir(root_path.join(".schema/migrations"))?
         .filter_map(|result|
             result
                 .ok()
@@ -297,14 +300,14 @@ fn list_migrations() -> std::io::Result<Vec<i64>> {
     )
 }
 
-fn read_migration(version: i64) -> std::io::Result<user_db::DbMigration> {
-    let sql = std::fs::read_to_string(format!(".schema/migrations/{}.sql", version))?;
+fn read_migration(root_path: &std::path::Path, version: i64) -> std::io::Result<user_db::DbMigration> {
+    let sql = std::fs::read_to_string(root_path.join(format!(".schema/migrations/{}.sql", version)))?;
 
     Ok(user_db::DbMigration { id: version.to_string(), query: sql })
 }
 
-fn write_migration(migration: user_db::DbMigration) -> std::io::Result<()> {
-    let mut file = File::create(format!(".schema/migrations/{}.sql", migration.id))?;
+fn write_migration(root_path: &std::path::Path, migration: user_db::DbMigration) -> std::io::Result<()> {
+    let mut file = File::create(root_path.join(format!(".schema/migrations/{}.sql", migration.id)))?;
     file.write_all(migration.query.as_bytes())?;
     Ok(())
 }
@@ -313,20 +316,20 @@ fn rusqlite_error_to_io(error: rusqlite::Error) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::Other, format!("{}", error))
 }
 
-fn update_db() -> std::io::Result<()> {
+fn update_db(root_path: &std::path::Path) -> std::io::Result<()> {
     let conn = Connection::open(".lantern/user.sqlite3").map_err(rusqlite_error_to_io)?;
     let mut user_db = user_db::UserDb { connection : conn };
     let is_new_db = user_db.is_new_db().map_err(rusqlite_error_to_io)?;
 
     if is_new_db {
-        let schema = read_schema()?;
+        let schema = read_schema(root_path.clone())?;
         user_db.load_schema(&schema).map_err(rusqlite_error_to_io)?;
     }
 
     let applied_migrations = user_db.applied_migrations().map_err(rusqlite_error_to_io)?;
     let max_migration = applied_migrations.iter().cloned().max().unwrap_or(0);
     let applied_migrations_set: HashSet<i64> = applied_migrations.iter().cloned().collect();
-    let all_migrations = list_migrations()?;
+    let all_migrations = list_migrations(root_path)?;
 
     for version in all_migrations {
         let applied = applied_migrations_set.contains(&version);
@@ -336,39 +339,58 @@ fn update_db() -> std::io::Result<()> {
         } else if !applied && is_new_db && version < max_migration {
             user_db.track_migration(version).map_err(rusqlite_error_to_io)?;
         } else {
-            user_db.run_migration(&read_migration(version)?).map_err(rusqlite_error_to_io)?;
+            user_db.run_migration(&read_migration(root_path, version)?).map_err(rusqlite_error_to_io)?;
         }
     }
 
-    write_schema(user_db.dump_schema().map_err(rusqlite_error_to_io)?)?;
+    write_schema(root_path, user_db.dump_schema().map_err(rusqlite_error_to_io)?)?;
 
     Ok(())
 }
 
-fn read_schema() -> std::io::Result<String> {
-    if std::fs::metadata(".schema/schema.sql").is_ok() {
-        std::fs::read_to_string(format!(".schema/schema.sql"))
+fn read_schema(root_path: &std::path::Path) -> std::io::Result<String> {
+    let full_path = root_path.join(".schema/schema.sql");
+
+    if std::fs::metadata(full_path.clone()).is_ok() {
+        std::fs::read_to_string(full_path)
     } else {
         Ok("".to_string())
     }
 }
 
-fn write_schema(schema: String) -> std::io::Result<()> {
-    let mut file = File::create(".schema/schema.sql")?;
+fn write_schema(root_path: &std::path::Path, schema: String) -> std::io::Result<()> {
+    let mut file = File::create(root_path.join(".schema/schema.sql"))?;
     file.write_all(schema.as_bytes())?;
     Ok(())
 }
 
 fn main() {
-    init_lantern().unwrap();
-    update_db().unwrap();
+    let cli_args: Vec<String> = env::args().collect();
+    let path_arg = cli_args.get(1);
+    if path_arg.is_none() {
+        println!("Lantern is a lightweight web backend for personal productivity apps.\n");
+        println!("Docs: https://github.com/temochka/lantern");
+        println!("Usage:");
+        println!("\tlantern <root>\t- Starts a lantern server in the given directory");
+        println!("\tlantern\t\t- Display this message");
+        println!("\nEnvironment variables:");
+        println!("\tLANTERN_PASSWORD\t- Master authentication password");
+        return ();
+    }
+    let lantern_root_path = std::path::Path::new(&path_arg.unwrap()).canonicalize().unwrap();
+    let lantern_root = lantern_root_path.to_str().unwrap().to_string();
+    let userdb_path = lantern_root_path.join(".lantern/user.sqlite3");
+    let lanterndb_path = lantern_root_path.join(".lantern/lantern.sqlite3");
+
+    init_lantern(lantern_root_path.as_path()).unwrap();
+    update_db(lantern_root_path.as_path()).unwrap();
     let sys = actix::System::new("Lantern");
     let user_db_addr = user_db::UserDb::create(|_| {
-        let conn = Connection::open(".lantern/user.sqlite3").unwrap();
+        let conn = Connection::open(userdb_path).unwrap();
         user_db::UserDb { connection : conn }
     });
     let lantern_db_addr = lantern_db::LanternDb::create(|_| {
-        let conn = Connection::open(".lantern/lantern.sqlite3").unwrap();
+        let conn = Connection::open(lanterndb_path).unwrap();
         lantern_db::LanternDb { connection : conn }
     });
     let env_password = env::var("LANTERN_PASSWORD").ok();
@@ -382,6 +404,7 @@ fn main() {
         lantern_db_addr: lantern_db_addr,
         password_hash: hash_password(&password, &salt),
         password_salt: salt,
+        root_path: lantern_root.clone(),
     });
 
     HttpServer::new(move || {
@@ -389,7 +412,7 @@ fn main() {
             .register_data(global_state.clone())
             .route("/_api/auth", web::post().to(auth))
             .route("/_api/ws", web::get().to(ws_api))
-            .service(fs::Files::new("/", ".").index_file("index.html"))
+            .service(fs::Files::new("/", lantern_root.clone()).index_file("index.html"))
     })
         .bind("127.0.0.1:4666")
         .unwrap()
