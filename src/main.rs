@@ -51,6 +51,16 @@ struct AuthResponse {
     expires_at: String,
 }
 
+struct PathPrefixGuard {
+    prefix: String,
+}
+
+impl actix_web::guard::Guard for PathPrefixGuard {
+    fn check(&self, request: &actix_web::dev::RequestHead) -> bool {
+        request.uri.path().starts_with(&self.prefix)
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "type")]
 enum WsRequest {
@@ -412,7 +422,11 @@ fn main() {
             .register_data(global_state.clone())
             .route("/_api/auth", web::post().to(auth))
             .route("/_api/ws", web::get().to(ws_api))
-            .service(fs::Files::new("/", lantern_root.clone()).index_file("index.html"))
+            .service(
+                fs::Files::new("/", lantern_root.clone())
+                    .index_file("index.html")
+                    .use_guards(PathPrefixGuard { prefix: "/.".to_string() })
+            )
     })
         .bind("127.0.0.1:4666")
         .unwrap()
