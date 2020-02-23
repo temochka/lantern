@@ -2,7 +2,7 @@ use actix::*;
 use actix::prelude::AsyncContext;
 use actix_files as fs;
 use actix_web::cookie::Cookie;
-use actix_web::{web, error, App, Error, HttpRequest, HttpResponse, HttpMessage, HttpServer};
+use actix_web::{web, error, App, Error, HttpRequest, HttpResponse, HttpServer};
 use actix_web_actors::ws;
 use chrono;
 use rand::{Rng};
@@ -16,13 +16,17 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::prelude::*;
 use std::iter;
+
 use std::env;
 use futures::future::{TryFutureExt};
 
+mod authentication;
 mod lantern_db;
 mod user_db;
+mod lantern;
 
 const VERSION: &'static str = env!("CARGO_PKG_VERSION");
+const ELM_AUTH: &'static str = include_str!("elm-auth/index.html");
 
 #[derive(actix::prelude::Message)]
 #[rtype("()")]
@@ -144,10 +148,8 @@ impl Actor for LanternConnection {
 impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for LanternConnection {
     fn handle(&mut self, payload: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
         if !self.authenticated { return; }
-        
-        if payload.is_err() { eprintln!("Protocol error!") }
 
-        let msg = payload.unwrap();
+        let msg = payload.expect("WebSockets protocol error");
 
         match msg {
             ws::Message::Ping(msg) => ctx.pong(&msg),
@@ -253,7 +255,23 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for LanternConnection
     }
 }
 
-async fn auth(req: web::Json<AuthRequest>, data: web::Data<GlobalState>) -> actix_web::Result<web::HttpResponse> {
+async fn index_page(req: HttpRequest, session: Option<lantern_db::entities::Session>, data: web::Data<lantern::GlobalState>) -> actix_web::Result<web::HttpResponse> {
+    if session.is_some() {
+        fs::NamedFile::open(std::path::Path::new(&data.root_path).join("index.html")).
+            or_else(|_| fs::NamedFile::open(std::path::Path::new(&data.root_path).join("index.htm")))?
+            .into_response(&req)
+    } else {
+        auth_page().await
+    }
+}
+
+async fn auth_page() -> actix_web::Result<web::HttpResponse> {
+    Ok(
+        web::HttpResponse::Ok().content_type("text/html").body(ELM_AUTH)
+    )
+}
+
+async fn auth(req: web::Json<AuthRequest>, data: web::Data<lantern::GlobalState>) -> actix_web::Result<web::HttpResponse> {
     if is_valid_password(&req.password, &data.password_salt, &data.password_hash) {
         let started_at = chrono::prelude::Utc::now();
         let expires_at = started_at.checked_add_signed(chrono::Duration::days(1)).unwrap();
@@ -281,16 +299,7 @@ async fn auth(req: web::Json<AuthRequest>, data: web::Data<GlobalState>) -> acti
     }
 }
 
-async fn ws_api(req: HttpRequest, stream: web::Payload, data: web::Data<GlobalState>) -> Result<HttpResponse, Error> {
-    let session_token = req.cookie("lantern_session").map(|cookie| cookie.value().to_string()).unwrap_or("".to_string());
-    let session = data.lantern_db_addr
-        .send(lantern_db::queries::LookupActiveSession { session_token: session_token, now: chrono::Utc::now() })
-        .await
-        .unwrap()
-        .map_err(|e| {
-            error::ErrorInternalServerError(format!("Failed to read session data: {}.", e))
-        })?;
-
+async fn ws_api(req: HttpRequest, session: Option<lantern_db::entities::Session>, stream: web::Payload, data: web::Data<lantern::GlobalState>) -> Result<HttpResponse, Error> {
     let resp = ws::start(
         LanternConnection {
             db_addr: data.user_db_addr.clone(),
@@ -303,14 +312,6 @@ async fn ws_api(req: HttpRequest, stream: web::Payload, data: web::Data<GlobalSt
         stream
     );
     resp
-}
-
-struct GlobalState {
-    lantern_db_addr: actix::prelude::Addr<lantern_db::LanternDb>,
-    user_db_addr: actix::prelude::Addr<user_db::UserDb>,
-    password_hash: String,
-    password_salt: String,
-    root_path: String,
 }
 
 fn hash_password(password: &str, salt: &str) -> String {
@@ -371,7 +372,7 @@ fn rusqlite_error_to_io(error: rusqlite::Error) -> std::io::Error {
 }
 
 fn update_db(root_path: &std::path::Path) -> std::io::Result<()> {
-    let conn = Connection::open(".lantern/user.sqlite3").map_err(rusqlite_error_to_io)?;
+    let conn = Connection::open(root_path.join(".lantern/user.sqlite3")).map_err(rusqlite_error_to_io)?;
     let mut user_db = user_db::UserDb { connection : conn };
     let is_new_db = user_db.is_new_db().map_err(rusqlite_error_to_io)?;
 
@@ -434,8 +435,8 @@ fn main() {
     }
     let lantern_root_path = std::path::Path::new(&path_arg.unwrap()).canonicalize().unwrap();
     let lantern_root = lantern_root_path.to_str().unwrap().to_string();
-    let userdb_path = lantern_root_path.join(".lantern/user.sqlite3");
-    let lanterndb_path = lantern_root_path.join(".lantern/lantern.sqlite3");
+    let userdb_path = dbg!(lantern_root_path.join(".lantern/user.sqlite3"));
+    let lanterndb_path = dbg!(lantern_root_path.join(".lantern/lantern.sqlite3"));
 
     init_lantern(lantern_root_path.as_path()).unwrap();
     update_db(lantern_root_path.as_path()).unwrap();
@@ -454,7 +455,7 @@ fn main() {
     }
     let password = env_password.unwrap_or(random_token(128));
     let salt = random_token(32);
-    let global_state = web::Data::new(GlobalState {
+    let global_state = web::Data::new(lantern::GlobalState {
         user_db_addr: user_db_addr,
         lantern_db_addr: lantern_db_addr,
         password_hash: hash_password(&password, &salt),
@@ -465,6 +466,9 @@ fn main() {
     HttpServer::new(move || {
         App::new()
             .app_data(global_state.clone())
+            .route("/", web::get().to(index_page))
+            .route("/index.html", web::get().to(index_page))
+            .route("/index.htm", web::get().to(index_page))
             .route("/_api/auth", web::post().to(auth))
             .route("/_api/ws", web::get().to(ws_api))
             .service(
