@@ -17,7 +17,7 @@ use std::fs::File;
 use std::io::prelude::*;
 use std::iter;
 use std::env;
-use futures::future::{Future};
+use futures::future::{TryFutureExt};
 
 mod lantern_db;
 mod user_db;
@@ -25,6 +25,7 @@ mod user_db;
 const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
 #[derive(actix::prelude::Message)]
+#[rtype("()")]
 struct LiveQueryRefresh;
 
 struct LanternConnection {
@@ -75,6 +76,7 @@ enum WsRequest {
 }
 
 #[derive(Message)]
+#[rtype("()")]
 #[derive(Serialize)]
 #[serde(tag = "type")]
 enum WsResponse {
@@ -104,13 +106,22 @@ impl actix::prelude::Handler<LiveQueryRefresh> for LanternConnection {
     type Result = ();
 
     fn handle(&mut self, _msg: LiveQueryRefresh, ctx: &mut Self::Context) {
-        let result = self.db_addr.send(self.live_queries.clone()).wait().unwrap();
-        let response = match result {
-            Ok(results) => WsResponse::LiveQuery { id: self.live_query_response_id.clone(), results: results },
-            Err(error) => WsResponse::Error { id: self.live_query_response_id.clone(), text: format!("{}", error) }
-        };
+        let response_id = self.live_query_response_id.clone();
+        let fut = self.db_addr.send(self.live_queries.clone())
+            .and_then(|result| {
+                let response = match result {
+                    Ok(results) => WsResponse::LiveQuery { id: response_id, results: results },
+                    Err(error) => WsResponse::Error { id: response_id, text: format!("{}", error) }
+                };
 
-        ctx.address().do_send(response);
+                futures::future::ok(response)
+            })
+            .into_actor(self)
+            .then(|response, _, ctx| {
+                ctx.address().do_send(response.unwrap());
+                actix::fut::ready(())
+            });
+        ctx.spawn(fut);
     }
 }
 
@@ -130,85 +141,119 @@ impl Actor for LanternConnection {
     }
 }
 
-impl StreamHandler<ws::Message, ws::ProtocolError> for LanternConnection {
-    fn handle(&mut self, msg: ws::Message, ctx: &mut Self::Context) {
+impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for LanternConnection {
+    fn handle(&mut self, payload: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
         if !self.authenticated { return; }
+        
+        if payload.is_err() { eprintln!("Protocol error!") }
+
+        let msg = payload.unwrap();
 
         match msg {
             ws::Message::Ping(msg) => ctx.pong(&msg),
             ws::Message::Text(text) => {
                 let message: serde_json::Result<WsRequest> = serde_json::from_str(&text[..]);
-                let response = match message {
+                match message {
                     Ok(request) => {
                         match request {
-                            WsRequest::Nop { id } => WsResponse::Nop { id: id },
-                            WsRequest::Echo { id, text } => WsResponse::Echo { id: id, text: text },
+                            WsRequest::Nop { id } => ctx.address().do_send(WsResponse::Nop { id: id }),
+                            WsRequest::Echo { id, text } => ctx.address().do_send(WsResponse::Echo { id: id, text: text }),
                             WsRequest::Migration { id, ddl } => {
                                 let migration = user_db::DbMigration::new(ddl);
-                                let result =
-                                    self
-                                        .db_addr
-                                        .send(migration.clone())
-                                        .wait()
-                                        .unwrap()
-                                        .map_err(rusqlite_error_to_io)
-                                        .and_then(|_| {
-                                            ctx.address().do_send(LiveQueryRefresh {});
-                                            write_migration(std::path::Path::new(&self.root_path), migration)
-                                        })
-                                        .and_then(|_| {
-                                            let schema = self.db_addr.send(user_db::SchemaDump {}).wait().unwrap().unwrap();
-                                            write_schema(std::path::Path::new(&self.root_path), schema)
+                                let root_path = self.root_path.clone();
+                                let fut =
+                                    self.db_addr.send(migration.clone())
+                                        .into_actor(self)
+                                        .then(move |result, actor, ctx| {
+                                            result
+                                                .unwrap()
+                                                .map_err(rusqlite_error_to_io)
+                                                .and_then(|_| {
+                                                    ctx.address().do_send(LiveQueryRefresh {});
+                                                    write_migration(std::path::Path::new(&root_path), migration)
+                                                })
+                                                .and_then(|_| {
+                                                    let fut = actor.db_addr.send(user_db::SchemaDump {})
+                                                        .into_actor(actor)
+                                                        .then(move |response, _, ctx| {
+                                                            let result = response.unwrap()
+                                                                .map_err(rusqlite_error_to_io)
+                                                                .and_then(|schema| write_schema(std::path::Path::new(&root_path), schema));
+
+                                                            match result {
+                                                                Ok(_) => ctx.address().do_send(WsResponse::Migration { id: id }),
+                                                                Err(error) => ctx.address().do_send(WsResponse::Error { id: id, text: format!("{}", error) })
+                                                            };
+
+                                                            fut::ready(())
+                                                        });
+                                                    ctx.spawn(fut);
+                                                    Ok(())
+                                                })
+                                                .or_else(|e| dbg!(Err(e)))
+                                                .unwrap();
+                                            fut::ready(())
                                         });
-        
-                                match result {
-                                    Ok(_) => WsResponse::Migration { id: id },
-                                    Err(error) => WsResponse::Error { id: id, text: format!("{}", error) }
-                                }
+                                ctx.spawn(fut);
                             },
                             WsRequest::ReaderQuery { id, query } => {
-                                let result = self.db_addr.send(query).wait().unwrap();
-
-                                match result {
-                                    Ok(result) => WsResponse::ReaderQuery { id: id, results: result },
-                                    Err(error) => WsResponse::Error { id: id, text: format!("{}", error) }
-                                }
+                                let fut = self.db_addr.send(query)
+                                    .into_actor(self)
+                                    .then(|response, _, ctx| {
+                                        let ws_response = match response.unwrap() {
+                                            Ok(result) => WsResponse::ReaderQuery { id: id, results: result },
+                                            Err(error) => WsResponse::Error { id: id, text: format!("{}", error) }
+                                        };
+                                        ctx.address().do_send(ws_response);
+                                        fut::ready(())
+                                    });
+                                ctx.spawn(fut);
                             },
                             WsRequest::WriterQuery { id, query } => {
-                                let result = self.db_addr.send(query).wait().unwrap();
+                                let fut = self.db_addr.send(query)
+                                    .into_actor(self)
+                                    .then(|response, _, ctx| {
+                                        let ws_response = match response.unwrap() {
+                                            Ok(result) => {
+                                                ctx.address().do_send(LiveQueryRefresh {});
+                                                WsResponse::WriterQuery { id: id, results: result }
+                                            },
+                                            Err(error) => WsResponse::Error { id: id, text: format!("{}", error) }
+                                        };
 
-                                match result {
-                                    Ok(result) => {
-                                        ctx.address().do_send(LiveQueryRefresh {});
-                                        WsResponse::WriterQuery { id: id, results: result }
-                                    },
-                                    Err(error) => WsResponse::Error { id: id, text: format!("{}", error) }
-                                }
+                                        ctx.address().do_send(ws_response);
+                                        fut::ready(())
+                                    });
+                                ctx.spawn(fut);
                             },
                             WsRequest::LiveQuery { id, queries } => {
                                 self.live_queries = queries.clone();
                                 self.live_query_response_id = id.clone();
         
-                                let result = self.db_addr.send(queries).wait().unwrap();
-        
-                                match result {
-                                    Ok(results) => WsResponse::LiveQuery { id: id, results: results },
-                                    Err(error) => WsResponse::Error { id: id, text: format!("{}", error) }
-                                }
+                                let fut = self.db_addr.send(queries)
+                                    .into_actor(self)
+                                    .then(|response, _, ctx| {
+                                        let ws_response = match response.unwrap() {
+                                            Ok(results) => WsResponse::LiveQuery { id: id, results: results },
+                                            Err(error) => WsResponse::Error { id: id, text: format!("{}", error) }
+                                        };
+
+                                        ctx.address().do_send(ws_response);
+                                        fut::ready(())
+                                    });
+                                ctx.spawn(fut);
                             }
                         }
                     }
-                    Err(_) => WsResponse::ChannelError { message: "Failed to parse request.".to_string() }
+                    Err(_) => ctx.address().do_send(WsResponse::ChannelError { message: "Failed to parse request.".to_string() })
                 };
-
-                ctx.address().do_send(response);
             },
             _ => (),
         }
     }
 }
 
-fn auth(req: web::Json<AuthRequest>, data: web::Data<GlobalState>) -> actix_web::Result<web::HttpResponse> {
+async fn auth(req: web::Json<AuthRequest>, data: web::Data<GlobalState>) -> actix_web::Result<web::HttpResponse> {
     if is_valid_password(&req.password, &data.password_salt, &data.password_hash) {
         let started_at = chrono::prelude::Utc::now();
         let expires_at = started_at.checked_add_signed(chrono::Duration::days(1)).unwrap();
@@ -219,7 +264,7 @@ fn auth(req: web::Json<AuthRequest>, data: web::Data<GlobalState>) -> actix_web:
             .finish();
         data.lantern_db_addr
             .send(lantern_db::queries::CreateSession { session_token: token, started_at, expires_at })
-            .wait()
+            .await
             .unwrap()
             .map_err(|e| {
                 error::ErrorInternalServerError(format!("Failed to start a new session: {}", e))
@@ -236,11 +281,11 @@ fn auth(req: web::Json<AuthRequest>, data: web::Data<GlobalState>) -> actix_web:
     }
 }
 
-fn ws_api(req: HttpRequest, stream: web::Payload, data: web::Data<GlobalState>) -> Result<HttpResponse, Error> {
+async fn ws_api(req: HttpRequest, stream: web::Payload, data: web::Data<GlobalState>) -> Result<HttpResponse, Error> {
     let session_token = req.cookie("lantern_session").map(|cookie| cookie.value().to_string()).unwrap_or("".to_string());
     let session = data.lantern_db_addr
         .send(lantern_db::queries::LookupActiveSession { session_token: session_token, now: chrono::Utc::now() })
-        .wait()
+        .await
         .unwrap()
         .map_err(|e| {
             error::ErrorInternalServerError(format!("Failed to read session data: {}.", e))
@@ -419,7 +464,7 @@ fn main() {
 
     HttpServer::new(move || {
         App::new()
-            .register_data(global_state.clone())
+            .app_data(global_state.clone())
             .route("/_api/auth", web::post().to(auth))
             .route("/_api/ws", web::get().to(ws_api))
             .service(
@@ -430,7 +475,7 @@ fn main() {
     })
         .bind("127.0.0.1:4666")
         .unwrap()
-        .start();
+        .run();
 
     println!("\n...lantern lit");
     sys.run().unwrap();
