@@ -6,7 +6,7 @@ Lantern is a lightweight backend for writing personal productivity apps. It hand
 
 ## Installation
 
-Binaries for Linux x86_64 are available from the releases tab on GitHub. The only dynamic dependency is libsqlite. To run on Mac, clone this repo and build using Cargo.
+Binaries for macOS, Linux (i386/amd64) are available from the releases tab on GitHub. The only dynamic dependency is libsqlite.
 
 ## Usage
 
