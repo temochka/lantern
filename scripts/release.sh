@@ -2,7 +2,7 @@
 set -eax
 
 VERSION=${1:-"alpha"}
-ARCHITECTURE=${2:-"unknown"}
+ARCHITECTURE=${2:-"x86_64-unknown-linux-musl"}
 
-cargo build --release
-tar -C target/release -cf lantern-${VERSION}_${ARCHITECTURE}.tar.gz lantern
+cargo build --release --target=${ARCHITECTURE}
+tar -C target/${ARCHITECTURE}/release -cf lantern-${VERSION}_${ARCHITECTURE}.tar.gz lantern
