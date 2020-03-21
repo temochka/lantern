@@ -27,17 +27,24 @@ jobs:
       - run:
           name: "Publish Release on GitHub"
           command: |
-            if [ -n "${CIRCLE_TAG}" ]; then
-              ghr -t ${GITHUB_TOKEN} -u ${CIRCLE_PROJECT_USERNAME} -r ${CIRCLE_PROJECT_REPONAME} -c ${CIRCLE_SHA1} -delete ${CIRCLE_TAG} ./artifacts/*.tar.gz
-            fi
+            ghr -t ${GITHUB_TOKEN} -u ${CIRCLE_PROJECT_USERNAME} -r ${CIRCLE_PROJECT_REPONAME} -c ${CIRCLE_SHA1} -delete ${CIRCLE_TAG} ./artifacts/*.tar.gz
 
 workflows:
   version: 2
   build:
     jobs:
-      - build_x86_64
-      - build_i686
+      - build_x86_64:
+          filters:
+            tags:
+              only: /.*/
+      - build_i686:
+          filters:
+            tags:
+              only: /.*/
       - publish-github-release:
+          filters:
+            tags:
+              only: /^v.*/
           requires:
             - build_x86_64
             - build_i686
