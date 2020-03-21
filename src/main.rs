@@ -64,7 +64,7 @@ struct PathPrefixGuard {
 
 impl actix_web::guard::Guard for PathPrefixGuard {
     fn check(&self, request: &actix_web::dev::RequestHead) -> bool {
-        request.uri.path().starts_with(&self.prefix)
+        !request.uri.path().starts_with(&self.prefix)
     }
 }
 
@@ -257,8 +257,8 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for LanternConnection
 
 async fn index_page(req: HttpRequest, session: Option<lantern_db::entities::Session>, data: web::Data<lantern::GlobalState>) -> actix_web::Result<web::HttpResponse> {
     if session.is_some() {
-        fs::NamedFile::open(std::path::Path::new(&data.root_path).join("index.html")).
-            or_else(|_| fs::NamedFile::open(std::path::Path::new(&data.root_path).join("index.htm")))?
+        fs::NamedFile::open(std::path::Path::new(&data.root_path).join("public/index.html")).
+            or_else(|_| fs::NamedFile::open(std::path::Path::new(&data.root_path).join("public/index.htm")))?
             .into_response(&req)
     } else {
         auth_page().await
@@ -472,8 +472,7 @@ fn main() {
             .route("/_api/auth", web::post().to(auth))
             .route("/_api/ws", web::get().to(ws_api))
             .service(
-                fs::Files::new("/", lantern_root.clone())
-                    .index_file("index.html")
+                fs::Files::new("/", lantern_root_path.join("public"))
                     .use_guards(PathPrefixGuard { prefix: "/.".to_string() })
             )
     })
