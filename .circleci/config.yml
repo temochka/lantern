@@ -6,7 +6,7 @@ jobs:
       - image: temochka/lantern-build:amd64
     steps:
       - checkout
-      - run: ./scripts/release.sh ${CIRCLE_TAG:-dev} x86_64-unknown-linux-musl
+      - run: ./scripts/release.sh x86_64-unknown-linux-musl
       - persist_to_workspace:
           root: ./artifacts
           paths:
@@ -17,7 +17,7 @@ jobs:
       - image: temochka/lantern-build:i386
     steps:
       - checkout
-      - run: ./scripts/release.sh ${CIRCLE_TAG:-dev} i686-unknown-linux-musl
+      - run: ./scripts/release.sh i686-unknown-linux-musl
       - persist_to_workspace:
           root: ./artifacts
           paths:
@@ -31,24 +31,18 @@ jobs:
       - run:
           name: "Publish Release on GitHub"
           command: |
-            ghr -t ${GITHUB_TOKEN} -u ${CIRCLE_PROJECT_USERNAME} -r ${CIRCLE_PROJECT_REPONAME} -c ${CIRCLE_SHA1} -delete ${CIRCLE_TAG} ./artifacts
+            ghr -t ${GITHUB_TOKEN} -u ${CIRCLE_PROJECT_USERNAME} -r ${CIRCLE_PROJECT_REPONAME} -c ${CIRCLE_SHA1} -delete ${CIRCLE_SHA1} ./artifacts
 
 workflows:
   version: 2
   build:
     jobs:
-      - build_x86_64:
-          filters:
-            tags:
-              only: /.*/
-      - build_i686:
-          filters:
-            tags:
-              only: /.*/
+      - build_x86_64
+      - build_i686
       - publish-github-release:
           filters:
-            tags:
-              only: /^v.*/
+            branches:
+              only: master
           requires:
             - build_x86_64
             - build_i686
