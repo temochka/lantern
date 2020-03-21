@@ -5,4 +5,5 @@ VERSION=${1:-"alpha"}
 ARCHITECTURE=${2:-"x86_64-unknown-linux-musl"}
 
 cargo build --release --target=${ARCHITECTURE}
-tar -C target/${ARCHITECTURE}/release -cf lantern-${VERSION}_${ARCHITECTURE}.tar.gz lantern
+mkdir -p artifacts
+tar -C target/${ARCHITECTURE}/release -cf artifacts/lantern-${VERSION}_${ARCHITECTURE}.tar.gz lantern
