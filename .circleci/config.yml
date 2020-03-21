@@ -6,18 +6,22 @@ jobs:
       - image: temochka/lantern-build:amd64
     steps:
       - checkout
-      - attach_workspace:
-          at: ./artifacts
       - run: ./scripts/release.sh ${CIRCLE_TAG:-dev} x86_64-unknown-linux-musl
+      - persist_to_workspace:
+          root: ./artifacts
+          paths:
+            - '*'
   build_i686:
     working_directory: /checkout
     docker:
       - image: temochka/lantern-build:i386
     steps:
       - checkout
-      - attach_workspace:
-          at: ./artifacts
       - run: ./scripts/release.sh ${CIRCLE_TAG:-dev} i686-unknown-linux-musl
+      - persist_to_workspace:
+          root: ./artifacts
+          paths:
+            - '*'
   publish-github-release:
     docker:
       - image: cibuilds/github:0.10
