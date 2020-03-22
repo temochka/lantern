@@ -3,4 +3,5 @@
 /.lantern
 /.schema
 /shell
+/artifacts
 /*.tar.gz
