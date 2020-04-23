@@ -22,6 +22,7 @@ use futures::future::{TryFutureExt};
 
 mod authentication;
 mod lantern_db;
+mod lantern_http;
 mod user_db;
 mod lantern;
 
@@ -76,6 +77,7 @@ enum WsRequest {
     ReaderQuery { id: String, query: user_db::ReaderQuery },
     WriterQuery { id: String, query: user_db::WriterQuery },
     LiveQuery { id: String, queries: user_db::LiveQueries },
+    HttpRequest { id: String, request: lantern_http::Request },
     Migration { id: String, ddl: String }
 }
 
@@ -91,6 +93,7 @@ enum WsResponse {
     ReaderQuery { id: String, results: serde_json::Value },
     WriterQuery { id: String, results: user_db::WriterQueryResult },
     LiveQuery { id: String, results: user_db::LiveResults },
+    HttpRequest { id: String, response: lantern_http::Response },
     Migration { id: String },
     Error { id: String, text: String },
     ChannelError { message: String },
@@ -237,6 +240,20 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for LanternConnection
                                     .then(|response, _, ctx| {
                                         let ws_response = match response.unwrap() {
                                             Ok(results) => WsResponse::LiveQuery { id: id, results: results },
+                                            Err(error) => WsResponse::Error { id: id, text: format!("{}", error) }
+                                        };
+
+                                        ctx.address().do_send(ws_response);
+                                        fut::ready(())
+                                    });
+                                ctx.spawn(fut);
+                            },
+                            WsRequest::HttpRequest { id, request } => {
+                                let fut = lantern_http::run(request)
+                                    .into_actor(self)
+                                    .then(|response, _, ctx| {
+                                        let ws_response = match response {
+                                            Ok(response) => WsResponse::HttpRequest { id, response },
                                             Err(error) => WsResponse::Error { id: id, text: format!("{}", error) }
                                         };
 
