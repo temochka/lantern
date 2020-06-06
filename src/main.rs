@@ -401,7 +401,9 @@ fn update_db(root_path: &std::path::Path) -> std::io::Result<()> {
     let applied_migrations = user_db.applied_migrations().map_err(rusqlite_error_to_io)?;
     let max_migration = applied_migrations.iter().cloned().max().unwrap_or(0);
     let applied_migrations_set: HashSet<i64> = applied_migrations.iter().cloned().collect();
-    let all_migrations = list_migrations(root_path)?;
+    let mut all_migrations = list_migrations(root_path)?;
+
+    all_migrations.sort();
 
     for version in all_migrations {
         let applied = applied_migrations_set.contains(&version);
