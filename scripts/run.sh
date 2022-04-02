@@ -1,0 +1,1 @@
+LANTERN_PASSWORD=12345 SKIP_AUTH=1 cargo run shell/dist
