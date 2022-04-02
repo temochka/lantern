@@ -7,4 +7,5 @@ pub struct GlobalState {
     pub password_hash: String,
     pub password_salt: String,
     pub root_path: String,
+    pub skip_auth: bool,
 }

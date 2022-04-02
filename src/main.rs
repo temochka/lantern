@@ -234,7 +234,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for LanternConnection
                             WsRequest::LiveQuery { id, queries } => {
                                 self.live_queries = queries.clone();
                                 self.live_query_response_id = id.clone();
-        
+
                                 let fut = self.db_addr.send(queries)
                                     .into_actor(self)
                                     .then(|response, _, ctx| {
@@ -289,7 +289,7 @@ async fn auth_page() -> actix_web::Result<web::HttpResponse> {
 }
 
 async fn auth(req: web::Json<AuthRequest>, data: web::Data<lantern::GlobalState>) -> actix_web::Result<web::HttpResponse> {
-    if is_valid_password(&req.password, &data.password_salt, &data.password_hash) {
+    if data.skip_auth || is_valid_password(&req.password, &data.password_salt, &data.password_hash) {
         let started_at = chrono::prelude::Utc::now();
         let expires_at = started_at.checked_add_signed(chrono::Duration::days(1)).unwrap();
         let token = random_token(128);
@@ -472,6 +472,7 @@ fn main() {
     if !env_password.is_some() {
         println!("LANTERN_PASSWORD not set, starting Lantern with a random password.");
     }
+    let skip_auth = env::var("SKIP_AUTH").map(|v| { v == "1" }).ok().unwrap_or(false);
     let password = env_password.unwrap_or(random_token(128));
     let salt = random_token(32);
     let global_state = web::Data::new(lantern::GlobalState {
@@ -480,6 +481,7 @@ fn main() {
         password_hash: hash_password(&password, &salt),
         password_salt: salt,
         root_path: lantern_root.clone(),
+        skip_auth: skip_auth,
     });
 
     HttpServer::new(move || {
