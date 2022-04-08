@@ -2,6 +2,11 @@ module Main exposing (main)
 
 import Browser
 import Browser.Navigation
+import Element exposing (Element)
+import Element.Background
+import Element.Border
+import Element.Font
+import Element.Input
 import Html
 import Html.Attributes
 import Html.Events
@@ -29,6 +34,16 @@ type Msg
     | HandleResponse (Result Http.Error ())
     | Submit
     | Reset
+
+
+backgroundColor : Element.Color
+backgroundColor =
+    Element.rgb255 7 54 66
+
+
+fontColor : Element.Color
+fontColor =
+    Element.rgb255 253 246 227
 
 
 authenticate : String -> Cmd Msg
@@ -79,26 +94,68 @@ update msg model =
             ( Typing "", Cmd.none )
 
 
-view : Model -> Html.Html Msg
+wrapper : Element msg -> Element msg
+wrapper body =
+    Element.el
+        [ Element.Font.color fontColor
+        , Element.Font.family
+            [ Element.Font.typeface "SF Mono"
+            , Element.Font.typeface "Menlo"
+            , Element.Font.typeface "Andale Mono"
+            , Element.Font.typeface "Monaco"
+            , Element.Font.monospace
+            ]
+        , Element.Background.color backgroundColor
+        , Element.height Element.fill
+        , Element.width Element.fill
+        , Element.padding 10
+        ]
+        body
+
+
+onEnter : msg -> Element.Attribute msg
+onEnter msg =
+    Element.htmlAttribute
+        (Html.Events.on "keyup"
+            (Json.Decode.field "key" Json.Decode.string
+                |> Json.Decode.andThen
+                    (\key ->
+                        if key == "Enter" then
+                            Json.Decode.succeed msg
+
+                        else
+                            Json.Decode.fail "Not the enter key"
+                    )
+            )
+        )
+
+
+view : Model -> Element.Element Msg
 view model =
     case model of
         Typing password ->
-            Html.form [ Html.Events.onSubmit Submit ]
-                [ Html.label [] [ Html.text "Password" ]
-                , Html.input
-                    [ Html.Attributes.type_ "password"
-                    , Html.Attributes.value password
-                    , Html.Events.onInput UpdatePassword
-                    ]
-                    []
-                , Html.input [ Html.Attributes.type_ "submit" ] []
+            Element.Input.currentPassword
+                [ onEnter Submit
+                , Element.htmlAttribute (Html.Attributes.autofocus True)
+                , Element.Background.color backgroundColor
+                , Element.Border.color fontColor
+
+                -- Fixes a bug in Safari
+                -- https://bugs.webkit.org/show_bug.cgi?id=142968
+                , Element.htmlAttribute (Html.Attributes.placeholder " ")
                 ]
+                { onChange = UpdatePassword
+                , placeholder = Nothing
+                , label = Element.Input.labelLeft [] (Element.text "Password >")
+                , show = False
+                , text = password
+                }
 
         Loading ->
-            Html.div [] [ Html.text "Loading..." ]
+            Element.text "Loading..."
 
         Success ->
-            Html.div [] [ Html.text "Success!" ]
+            Element.text "Success!"
 
         Failure failure ->
             let
@@ -110,7 +167,7 @@ view model =
                         InvalidPassword ->
                             "Invalid password"
             in
-            Html.div [] [ Html.p [] [ Html.text error ] ]
+            Element.text error
 
 
 main : Program () Model Msg
@@ -120,7 +177,7 @@ main =
         , view =
             \model ->
                 { title = "Light the lantern"
-                , body = [ view model ]
+                , body = [ Element.layout [] <| wrapper <| view model ]
                 }
         , update = update
         , subscriptions = always Sub.none
