@@ -123,7 +123,7 @@ pub struct WriterQuery {
     pub arguments: QueryArguments
 }
 
-pub type QueryArguments = HashMap<String, String>;
+pub type QueryArguments = HashMap<String, Option<String>>;
 
 #[derive(Clone, Debug)]
 pub struct DbMigration {
