@@ -26,14 +26,14 @@ impl UserDb {
     fn run_reader_query(&self, query: &ReaderQuery) -> rusqlite::Result<serde_json::Value> {
         let mut stmt = self.connection.prepare(&query.query)?;
         let results = stmt
-            .query_map_named(&self.arguments_to_named_params(&query.arguments)[..], |row| self.parse_row(row))
+            .query_map(&self.arguments_to_named_params(&query.arguments)[..], |row| self.parse_row(row))
             .and_then(|r| r.collect())?;
 
         Ok(serde_json::Value::Array(results))
     }
 
     fn run_writer_query(&self, query: &WriterQuery) -> rusqlite::Result<WriterQueryResult> {
-        let changed_rows = self.connection.execute_named(&query.query, &self.arguments_to_named_params(&query.arguments)[..])?;
+        let changed_rows = self.connection.execute(&query.query, &self.arguments_to_named_params(&query.arguments)[..])?;
 
         Ok(WriterQueryResult { changed_rows: changed_rows, last_insert_rowid: self.connection.last_insert_rowid() })
     }
@@ -62,12 +62,12 @@ impl UserDb {
     pub fn dump_schema(&self) -> rusqlite::Result<String> {
         let version: i64 = self.connection.query_row(
             "SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations",
-            rusqlite::NO_PARAMS,
+            [],
             |row| row.get(0)
         )?;
 
         let mut stmt = self.connection.prepare("SELECT sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name")?;
-        let result: rusqlite::Result<Vec<String>> = stmt.query_map(rusqlite::NO_PARAMS, |row| row.get(0))?.collect();
+        let result: rusqlite::Result<Vec<String>> = stmt.query_map([], |row| row.get(0))?.collect();
 
         result
             .map(|rows| rows.iter().fold("".to_string(), |acc, schema| acc + schema + ";\n\n"))
@@ -87,21 +87,22 @@ impl UserDb {
 
     pub fn is_new_db(&self) -> rusqlite::Result<bool> {
         let mut stmt = self.connection.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations';")?;
-        stmt.query_row(rusqlite::NO_PARAMS, |_| Ok(true)).optional().map(|opt| opt.is_none())
+        stmt.query_row([], |_| Ok(true)).optional().map(|opt| opt.is_none())
     }
 
     pub fn applied_migrations(&self) -> rusqlite::Result<Vec<i64>> {
         let mut stmt = self.connection.prepare("SELECT version FROM schema_migrations ORDER BY version")?;
-        let result = stmt.query_map(rusqlite::NO_PARAMS, |row| row.get(0))?;
+        let result = stmt.query_map([], |row| row.get(0))?;
         result.collect()
     }
 
     fn parse_row(&self, row: &rusqlite::Row) -> rusqlite::Result<serde_json::Value> {
         row
-            .columns()
+            .as_ref()
+            .column_names()
             .iter()
             .enumerate()
-            .map(|(i, col)| Ok((col.name().to_string(), row.get::<_, JsonValue>(i).map(|JsonValue(v)| v)?)))
+            .map(|(i, col)| Ok((col.to_string(), row.get::<_, JsonValue>(i).map(|JsonValue(v)| v)?)))
             .collect::<Result<serde_json::Map<String, serde_json::Value>, _>>()
             .map(|r| serde_json::Value::Object(r))
     }
