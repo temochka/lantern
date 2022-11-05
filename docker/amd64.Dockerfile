@@ -1,4 +1,4 @@
-FROM amd64/rust:1.39
+FROM amd64/rust:1.63
 
 WORKDIR /opt
 
