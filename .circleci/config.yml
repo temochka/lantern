@@ -11,17 +11,6 @@ jobs:
           root: ./artifacts
           paths:
             - '*'
-  build_i686:
-    working_directory: /checkout
-    docker:
-      - image: temochka/lantern-build:i386
-    steps:
-      - checkout
-      - run: ./scripts/release.sh i686-unknown-linux-musl
-      - persist_to_workspace:
-          root: ./artifacts
-          paths:
-            - '*'
   release:
     docker:
       - image: cibuilds/github:0.10
@@ -36,11 +25,9 @@ workflows:
   build:
     jobs:
       - build_x86_64
-      - build_i686
       - release:
           filters:
             branches:
               only: main
           requires:
             - build_x86_64
-            - build_i686
