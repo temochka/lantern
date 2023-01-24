@@ -7,7 +7,6 @@ import Element.Background
 import Element.Border
 import Element.Font
 import Element.Input
-import Html
 import Html.Attributes
 import Html.Events
 import Http
@@ -134,22 +133,34 @@ view : Model -> Element.Element Msg
 view model =
     case model of
         Typing password ->
-            Element.Input.currentPassword
-                [ onEnter Submit
-                , Element.htmlAttribute (Html.Attributes.autofocus True)
-                , Element.Background.color backgroundColor
-                , Element.Border.color fontColor
+            Element.row
+                [ Element.width Element.fill, Element.spacing 10 ]
+                [ Element.Input.currentPassword
+                    [ onEnter Submit
+                    , Element.htmlAttribute (Html.Attributes.autofocus True)
+                    , Element.Background.color backgroundColor
+                    , Element.Border.color fontColor
+                    , Element.width Element.fill
 
-                -- Fixes a bug in Safari
-                -- https://bugs.webkit.org/show_bug.cgi?id=142968
-                , Element.htmlAttribute (Html.Attributes.placeholder " ")
+                    -- Fixes a bug in Safari
+                    -- https://bugs.webkit.org/show_bug.cgi?id=142968
+                    , Element.htmlAttribute (Html.Attributes.placeholder " ")
+                    ]
+                    { onChange = UpdatePassword
+                    , placeholder = Nothing
+                    , label = Element.Input.labelLeft [] (Element.text "Password:")
+                    , show = False
+                    , text = password
+                    }
+                , Element.Input.button
+                    [ Element.Border.color fontColor
+                    , Element.Border.width 1
+                    , Element.Border.rounded 5
+                    , Element.height Element.fill
+                    , Element.paddingXY 5 0
+                    ]
+                    { onPress = Just Submit, label = Element.text "Enter" }
                 ]
-                { onChange = UpdatePassword
-                , placeholder = Nothing
-                , label = Element.Input.labelLeft [] (Element.text "Password >")
-                , show = False
-                , text = password
-                }
 
         Loading ->
             Element.text "Loading..."
