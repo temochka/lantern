@@ -291,7 +291,7 @@ async fn auth_page() -> actix_web::Result<web::HttpResponse> {
 async fn auth(req: web::Json<AuthRequest>, data: web::Data<lantern::GlobalState>) -> actix_web::Result<web::HttpResponse> {
     if data.skip_auth || is_valid_password(&req.password, &data.password_salt, &data.password_hash) {
         let started_at = chrono::prelude::Utc::now();
-        let expires_at = started_at.checked_add_signed(chrono::Duration::days(1)).unwrap();
+        let expires_at = started_at.checked_add_signed(chrono::Duration::days(365)).unwrap();
         let token = random_token(128);
         let cookie = Cookie::build("lantern_session", token.clone())
             .path("/")
