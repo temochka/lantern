@@ -27,7 +27,23 @@ mod user_db;
 mod lantern;
 
 const VERSION: &'static str = env!("CARGO_PKG_VERSION");
-const ELM_AUTH: &'static str = include_str!("elm-auth/index.html");
+const ELM_AUTH: &'static str = concat!(r##"<!DOCTYPE HTML>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lantern Auth</title>
+<style>body { padding: 0; margin: 0; }</style>
+</head>
+<body>
+<pre id="main"></div>
+<script>"##,
+include_str!("elm-auth/elm-auth.js"),
+r##"</script>
+<script>Elm.Main.init({ node: document.getElementById("main") });</script>
+</body>
+</html>"##
+);
 
 #[derive(actix::prelude::Message)]
 #[rtype("()")]
