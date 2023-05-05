@@ -2,6 +2,7 @@ use actix::*;
 use actix::prelude::AsyncContext;
 use actix_files as fs;
 use actix_web::cookie::Cookie;
+use actix_web::cookie::time as cookie_time;
 use actix_web::guard::GuardContext;
 use actix_web::{web, error, App, Error, HttpRequest, HttpResponse, HttpServer};
 use actix_web_actors::ws;
@@ -307,12 +308,14 @@ async fn auth_page() -> actix_web::Result<HttpResponse> {
 
 async fn auth(req: web::Json<AuthRequest>, data: web::Data<lantern::GlobalState>) -> actix_web::Result<HttpResponse> {
     if data.skip_auth || is_valid_password(&req.password, &data.password_salt, &data.password_hash) {
-        let started_at = chrono::prelude::Utc::now();
-        let expires_at = started_at.checked_add_signed(chrono::Duration::days(365)).unwrap();
+        let started_at = chrono::Utc::now();
+        let expires_at = started_at + chrono::Duration::days(365);
         let token = random_token(128);
+
         let cookie = Cookie::build("lantern_session", token.clone())
             .path("/")
             .http_only(true)
+            .expires(cookie_time::OffsetDateTime::from_unix_timestamp(expires_at.timestamp()).unwrap())
             .finish();
         data.lantern_db_addr
             .send(lantern_db::queries::CreateSession { session_token: token, started_at, expires_at })
