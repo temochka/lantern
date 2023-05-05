@@ -2,10 +2,11 @@ use actix::*;
 use actix::prelude::AsyncContext;
 use actix_files as fs;
 use actix_web::cookie::Cookie;
+use actix_web::guard::GuardContext;
 use actix_web::{web, error, App, Error, HttpRequest, HttpResponse, HttpServer};
 use actix_web_actors::ws;
 use chrono;
-use rand::{Rng};
+use rand::Rng;
 use rand::distributions::Alphanumeric;
 use regex::Regex;
 use rusqlite::{Connection};
@@ -15,7 +16,6 @@ use serde_json;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::prelude::*;
-use std::iter;
 
 use std::env;
 use futures::future::{TryFutureExt};
@@ -80,8 +80,8 @@ struct PathPrefixGuard {
 }
 
 impl actix_web::guard::Guard for PathPrefixGuard {
-    fn check(&self, request: &actix_web::dev::RequestHead) -> bool {
-        !request.uri.path().starts_with(&self.prefix)
+    fn check(&self, ctx: &GuardContext) -> bool {
+        !ctx.head().uri.path().starts_with(&self.prefix)
     }
 }
 
@@ -288,23 +288,24 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for LanternConnection
     }
 }
 
-async fn index_page(req: HttpRequest, session: Option<lantern_db::entities::Session>, data: web::Data<lantern::GlobalState>) -> actix_web::Result<web::HttpResponse> {
+async fn index_page(req: HttpRequest, session: Option<lantern_db::entities::Session>, data: web::Data<lantern::GlobalState>) -> actix_web::Result<HttpResponse> {
     if session.is_some() {
-        fs::NamedFile::open(std::path::Path::new(&data.root_path).join("public/index.html")).
+        let response = fs::NamedFile::open(std::path::Path::new(&data.root_path).join("public/index.html")).
             or_else(|_| fs::NamedFile::open(std::path::Path::new(&data.root_path).join("public/index.htm")))?
-            .into_response(&req)
+            .into_response(&req);
+        Ok(response)
     } else {
         auth_page().await
     }
 }
 
-async fn auth_page() -> actix_web::Result<web::HttpResponse> {
+async fn auth_page() -> actix_web::Result<HttpResponse> {
     Ok(
-        web::HttpResponse::Ok().content_type("text/html").body(ELM_AUTH)
+        HttpResponse::Ok().content_type("text/html").body(ELM_AUTH)
     )
 }
 
-async fn auth(req: web::Json<AuthRequest>, data: web::Data<lantern::GlobalState>) -> actix_web::Result<web::HttpResponse> {
+async fn auth(req: web::Json<AuthRequest>, data: web::Data<lantern::GlobalState>) -> actix_web::Result<HttpResponse> {
     if data.skip_auth || is_valid_password(&req.password, &data.password_salt, &data.password_hash) {
         let started_at = chrono::prelude::Utc::now();
         let expires_at = started_at.checked_add_signed(chrono::Duration::days(365)).unwrap();
@@ -356,10 +357,10 @@ fn is_valid_password(password: &str, salt: &str, password_hash: &str) -> bool {
 }
 
 fn random_token(length: usize) -> String {
-    let mut rng = rand::thread_rng();
-    iter::repeat(())
-        .map(|_| rng.sample(Alphanumeric))
+    rand::thread_rng()
+        .sample_iter(Alphanumeric)
         .take(length)
+        .map(char::from)
         .collect()
 }
 
@@ -454,7 +455,8 @@ fn write_schema(root_path: &std::path::Path, schema: String) -> std::io::Result<
     Ok(())
 }
 
-fn main() {
+#[actix_web::main]
+async fn main() -> Result<(), std::io::Error> {
     let cli_args: Vec<String> = env::args().collect();
     let path_arg = cli_args.get(1);
     if path_arg.is_none() {
@@ -466,7 +468,7 @@ fn main() {
         println!("\tlantern\t\t- Display this message");
         println!("\nEnvironment variables:");
         println!("\tLANTERN_PASSWORD\t- Master authentication password");
-        return ();
+        return Ok(());
     }
     let lantern_root_path = std::path::Path::new(&path_arg.unwrap()).canonicalize().unwrap();
     let lantern_root = lantern_root_path.to_str().unwrap().to_string();
@@ -475,7 +477,6 @@ fn main() {
 
     init_lantern(lantern_root_path.as_path()).unwrap();
     update_db(lantern_root_path.as_path()).unwrap();
-    let sys = actix::System::new("Lantern");
     let user_db_addr = user_db::UserDb::create(|_| {
         let conn = Connection::open(userdb_path).unwrap();
         user_db::UserDb { connection : conn }
@@ -500,7 +501,7 @@ fn main() {
         skip_auth: skip_auth,
     });
 
-    HttpServer::new(move || {
+    let server = HttpServer::new(move || {
         App::new()
             .app_data(global_state.clone())
             .route("/", web::get().to(index_page))
@@ -510,13 +511,13 @@ fn main() {
             .route("/_api/ws", web::get().to(ws_api))
             .service(
                 fs::Files::new("/", lantern_root_path.join("public"))
-                    .use_guards(PathPrefixGuard { prefix: "/.".to_string() })
+                    .method_guard(PathPrefixGuard { prefix: "/.".to_string() })
             )
     })
         .bind("127.0.0.1:4666")
-        .unwrap()
-        .run();
+        .unwrap();
 
     println!("\n...lantern lit");
-    sys.run().unwrap();
+    let _ = server.run().await;
+    Ok(())
 }

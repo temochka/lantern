@@ -1,5 +1,5 @@
 use actix_web::dev::Payload;
-use actix_web::{Error, FromRequest, HttpMessage};
+use actix_web::{Error, FromRequest};
 use futures::future::{BoxFuture, TryFutureExt};
 
 use crate::lantern_db;
@@ -22,7 +22,6 @@ impl Into<Error> for SessionError {
 impl FromRequest for lantern_db::entities::Session {
     type Error = SessionError;
     type Future = BoxFuture<'static, Result<Self, Self::Error>>;
-    type Config = ();
 
     fn from_request(req: &actix_web::HttpRequest, _payload: &mut Payload) -> Self::Future {
         let data = req.app_data::<actix_web::web::Data<lantern::GlobalState>>().unwrap();
