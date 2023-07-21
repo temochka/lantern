@@ -337,7 +337,7 @@ async fn auth(req: web::Json<AuthRequest>, data: web::Data<lantern::GlobalState>
 }
 
 async fn ws_api(req: HttpRequest, session: Option<lantern_db::entities::Session>, stream: web::Payload, data: web::Data<lantern::GlobalState>) -> Result<HttpResponse, Error> {
-    let resp = ws::start(
+    let resp = ws::WsResponseBuilder::new(
         LanternConnection {
             db_addr: data.user_db_addr.clone(),
             live_query_response_id : format!(""),
@@ -347,7 +347,9 @@ async fn ws_api(req: HttpRequest, session: Option<lantern_db::entities::Session>
         },
         &req,
         stream
-    );
+    )
+        .frame_size(262_144) // 256 KB
+        .start();
     resp
 }
 
